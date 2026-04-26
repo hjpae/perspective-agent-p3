@@ -1,4 +1,4 @@
-name: cear-phase2
+name: cear-phase3
 channels:
   - conda-forge
 dependencies:
@@ -20,7 +20,7 @@ dependencies:
       # - torchaudio
 
 #conda env create -f environment.yml
-#conda activate cear-phase2
+#conda activate cear-phase3
 
 #pip install --no-cache-dir torch torchvision torchaudio \
 #  --index-url https://download.pytorch.org/whl/cu128
