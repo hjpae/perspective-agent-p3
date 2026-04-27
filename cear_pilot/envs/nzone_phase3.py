@@ -4,9 +4,8 @@
 Phase 3 environment: minimal embodiment extension of Phase 2.
 
 Continuity with Phase 2:
-- Same world geometry (W x H grid, sigma gradient, zone boundaries)
-- Same perturbation mechanism (transient inversion of sigma gradient)
-- Inherits NZonePhase2Env; only the additions below are new
+- Same world geometry style (sigma gradient, perturbation mechanism)
+- Inherits NZonePhase2Env; only the additions and grid-shape changes below are new
 
 What is new (the "filling of the intentional gap"):
 1. Self-cell observation
@@ -17,9 +16,9 @@ What is new (the "filling of the intentional gap"):
 2. Per-cell affordance channel
    Each cell now carries TWO channels:
      channel 0: env_sample  (or body_state, for the self-cell)
-     channel 1: affordance  (zone-dependent valenced property)
-   So obs_dim = 9 cells x 2 channels = 18 (vs. Phase 2's 8 x 1 = 8).
-   Self-cell's channel 0 reads body_state; its channel 1 is 0 by convention.
+     channel 1: affordance value at that cell (Position 2: self-cell also
+                carries the affordance of its current cell)
+   So obs_dim = 9 cells x 2 channels = 18.
 
 3. Body state
    A minimal scalar (energy, in [body_min, body_max]) carried by the agent.
@@ -27,18 +26,22 @@ What is new (the "filling of the intentional gap"):
        body <- body  - metabolic_cost
                      - movement_cost (if moved)
                      + affordance_at_current_cell * affordance_to_body_gain
-   The agent reads its own body_state through the self-cell's channel 0.
+   This is *environment dynamics* (a physical fact, like sigma gradient),
+   not an imposed value function. The agent has no preference about body
+   state; it only learns to predict body dynamics via prediction error.
 
-4. Affordance structure
-   Each zone has a fixed affordance value (default: graded with sigma —
-   cleaner zones positive, noisier zones negative). The agent observes
-   the affordance of every cell in its 9-cell patch (including its own
-   cell, via the affordance map; channel 1 of self-cell is held at 0
-   to keep the self-cell semantically distinct).
-   For probing different stances, override `affordance_per_zone` in config.
+4. Grid redesign (15 x 15 with orthogonal gradients)
+   - Horizontal axis: perception challenge (sigma gradient, linear).
+     Left noisy, right clean. Same role as phase 2.
+   - Vertical axis: valence gradient (affordance, sigmoid).
+     Top positive (appetitive), bottom negative (aversive).
+   - Two gradients are *orthogonal* — perception and valence are
+     independent dimensions for stance differentiation.
+   - 3 horizontal zones (5 cols each) x 3 vertical zones (5 rows each)
+     for analytical convenience; gradient itself is smooth.
 
-Action consequences flow from movement -> body_state -> next observation,
-which is the architectural minimum for "action returns to body."
+5. Action consequences flow movement -> body_state -> next observation.
+   "Action returns to body" architecturally instantiated.
 
 Notes:
 - Environment field still NEVER changes between episodes; sigma gradient
@@ -70,7 +73,7 @@ from cear_pilot.envs.nzone_phase2 import NZonePhase2Config, NZonePhase2Env
 
 # 9-cell patch order: 8 surrounding + 1 self at index 8.
 # Self-cell is intentionally placed last so existing 8-cell indexing logic
-# (e.g. for visualization) maps cleanly to the surrounding cells [0..7].
+# maps cleanly to the surrounding cells [0..7].
 PHASE3_PATCH_ORDER: Tuple[Tuple[int, int], ...] = (
     (-1, -1), (0, -1), (1, -1),
     (-1,  0),          (1,  0),
@@ -81,39 +84,53 @@ PHASE3_PATCH_ORDER: Tuple[Tuple[int, int], ...] = (
 
 @dataclass
 class NZonePhase3Config(NZonePhase2Config):
-    """Phase 3 config extends Phase 2 with body & affordance settings.
+    """Phase 3 config extends Phase 2 with body & affordance settings,
+    plus grid redesign for orthogonal perception/valence gradients."""
 
-    Field overrides from Phase 2:
-      - patch_order: 9 cells (was 8)
-      - obs_dim:     18 (= 9 cells x 2 channels)  (was 8)
-    """
+    # ----- grid redesign: 15x15 with column/row partitioned into 3 zones each -----
+    width: int = 15
+    height: int = 15
+    start_xy: Tuple[int, int] = (7, 7)             # geometric center
+    max_steps: int = 300                           # bump to 400 if needed
+    # Column zones (perception): 3 zones of 5 cols each. Boundaries at 5 and 10.
+    report_zone_boundaries: Tuple[int, ...] = (5, 10)
+    # Row zones (valence): 3 zones of 5 rows each. Boundaries at 5 and 10.
+    valence_zone_boundaries: Tuple[int, ...] = (5, 10)
 
-    # ----- observation layout (overrides phase 2 defaults) -----
+    # ----- horizontal: perception (sigma) gradient (linear) -----
+    sigma_left: float = 0.20
+    sigma_right: float = 0.10
+    # zone_mu_scale / row_mu_scale inherited; row_mu_scale=0.10 keeps mild
+    # vertical signal in mu so vertical movement also has perceptual content
+    # (otherwise vertical would carry only valence, making the two axes
+    # confounded with "what the agent perceives" vs "what it doesn't").
+
+    # ----- vertical: affordance (valence) gradient (sigmoid) -----
+    affordance_top: float = 0.5                    # row 0
+    affordance_bottom: float = -0.5                # row H-1
+    affordance_sigmoid_slope: float = 1.6          # tanh slope, mild
+
+    # ----- observation layout -----
     patch_order: Tuple[Tuple[int, int], ...] = PHASE3_PATCH_ORDER
     n_channels_per_cell: int = 2
     # 9 cells * 2 channels = 18; include_xy adds 2 more downstream.
     obs_dim: int = 18
 
     # ----- body state -----
-    body_dim: int = 1                 # minimal scalar energy
-    body_init: float = 0.5            # initial value
+    body_dim: int = 1
+    body_init: float = 0.5
     body_min: float = 0.0
     body_max: float = 1.0
-    metabolic_cost: float = 0.005     # per-step base cost
-    movement_cost: float = 0.005      # extra cost when action != STAY
-
-    # ----- affordance structure -----
-    # One value per report-zone (left -> right). Default: cleaner = positive,
-    # noisier = negative (mirrors sigma gradient). Override to design
-    # differentiated formation conditions.
-    # Zone count = len(report_zone_boundaries) + 1.
-    affordance_per_zone: Tuple[float, ...] = (-0.5, -0.25, 0.0, 0.25, 0.5)
+    # Defaults chosen via random-walk diagnostic (see diagnose_phase3_env.py):
+    # this regime gives strong delta_body↔affordance coupling (corr ~0.68 under
+    # random policy) with moderate body range (~0.56). Saturation under
+    # random policy is non-trivial (~0.26 at body_min) but is a worst-case
+    # baseline; trained agents are expected to manage body better. Tunable.
+    metabolic_cost: float = 0.002
+    movement_cost: float = 0.002
     affordance_to_body_gain: float = 0.02
 
     # ----- termination -----
-    # If True, episode ends when body_state hits body_min.
-    # Default False so episode length is decoupled from body dynamics
-    # (matches phase 2 max_steps semantics).
     terminate_on_body_min: bool = False
 
 
@@ -122,12 +139,7 @@ class NZonePhase3Config(NZonePhase2Config):
 # ---------------------------------------------------------------------------
 
 class NZonePhase3Env(NZonePhase2Env):
-    """Minimal embodied extension of Phase 2.
-
-    Inherits world geometry, sigma gradient, and perturbation logic from
-    NZonePhase2Env; overrides observation, step, reset, and info dict to
-    add the embodied layer.
-    """
+    """Minimal embodied extension of Phase 2."""
 
     SELF_CELL_INDEX: int = 8  # index of (0, 0) in PHASE3_PATCH_ORDER
 
@@ -137,17 +149,15 @@ class NZonePhase3Env(NZonePhase2Env):
         render_mode: Optional[str] = None,
     ):
         cfg = config or NZonePhase3Config()
-        # Phase 2 __init__ reads cfg.obs_dim and cfg.patch_order, so the
-        # phase 3 overrides are honored.
         super().__init__(config=cfg, render_mode=render_mode)
 
         # Phase 3 specific state
         self.body_state: np.ndarray = np.array([cfg.body_init], dtype=np.float32)
 
-        # Static affordance map indexed by (y, x)
+        # Static affordance map indexed by (y, x): vertical sigmoid gradient
         self._affordance_map: np.ndarray = self._build_affordance_map()
 
-        # Step-level diagnostics (reset each step)
+        # Step-level diagnostics
         self._last_metabolic_delta: float = 0.0
         self._last_affordance_gain: float = 0.0
 
@@ -157,21 +167,41 @@ class NZonePhase3Env(NZonePhase2Env):
     def cfg3(self) -> NZonePhase3Config:
         return self.cfg  # type: ignore[return-value]
 
-    # ----- affordance map -----
+    # ----- affordance map (vertical sigmoid) -----
 
     def _build_affordance_map(self) -> np.ndarray:
-        """Per-cell affordance value (H, W). Constant in time."""
-        afford = np.zeros((self.H, self.W), dtype=np.float32)
-        affs = self.cfg3.affordance_per_zone
-        n_zones_expected = len(self.cfg.report_zone_boundaries) + 1
-        if len(affs) < n_zones_expected:
-            # Pad with zeros if user provided fewer values.
-            affs = tuple(list(affs) + [0.0] * (n_zones_expected - len(affs)))
-        for x in range(self.W):
-            zone = self.report_zone_id(x)
-            zone = min(zone, len(affs) - 1)
-            afford[:, x] = affs[zone]
+        """Per-cell affordance value (H, W). Vertical sigmoid gradient:
+        top rows positive (appetitive), bottom rows negative (aversive).
+        Constant in time."""
+        H, W = self.H, self.W
+        cfg = self.cfg3
+
+        # Map row index to [+1, -1]: top = +1, bottom = -1
+        row_center = (H - 1) / 2.0
+        # y_norm in [+1, -1] from top to bottom
+        y_norm = -(np.arange(H, dtype=np.float32) - row_center) / max(1.0, row_center)
+
+        # Sigmoid (tanh) gradient with mild slope
+        gradient = np.tanh(cfg.affordance_sigmoid_slope * y_norm).astype(np.float32)
+
+        # Scale to [affordance_bottom, affordance_top]
+        a_top = float(cfg.affordance_top)
+        a_bot = float(cfg.affordance_bottom)
+        mid = 0.5 * (a_top + a_bot)
+        half = 0.5 * (a_top - a_bot)
+        col_affordance = mid + half * gradient  # shape (H,)
+
+        afford = np.tile(col_affordance[:, None], (1, W)).astype(np.float32)
         return afford
+
+    def valence_zone_id(self, y: int) -> int:
+        """Row-based valence zone id (top = 0). For analytical convenience.
+        Vertical analogue of report_zone_id."""
+        y = int(np.clip(y, 0, self.H - 1))
+        for zi, b in enumerate(self.cfg3.valence_zone_boundaries):
+            if y < int(b):
+                return zi
+        return len(self.cfg3.valence_zone_boundaries)
 
     # ----- observation -----
 
@@ -181,9 +211,9 @@ class NZonePhase3Env(NZonePhase2Env):
           For surrounding cells (indices 0..7):
             ch 0: env sample (mu + noise)  -- with perturbation distortion
             ch 1: affordance value at that cell
-          For self-cell (index 8):
+          For self-cell (index 8):  [Position 2]
             ch 0: body state
-            ch 1: 0  (held distinct from environmental affordance)
+            ch 1: affordance at current cell (the cell the agent is in)
 
         Optionally appends normalized (x, y) if cfg.include_xy.
         """
@@ -195,7 +225,8 @@ class NZonePhase3Env(NZonePhase2Env):
             is_self = (dx == 0 and dy == 0)
             if is_self:
                 obs[i, 0] = float(self.body_state[0])
-                obs[i, 1] = 0.0
+                # Position 2: self-cell ch1 = current cell's affordance
+                obs[i, 1] = float(self._affordance_map[self.y, self.x])
             else:
                 obs[i, 0] = self._sample_cell(self.x + dx, self.y + dy)
                 px, py = self._patch_coord(self.x + dx, self.y + dy)
@@ -221,14 +252,14 @@ class NZonePhase3Env(NZonePhase2Env):
         return flat.astype(np.float32)
 
     def _perturbation_distortion_per_cell(self) -> np.ndarray:
-        """Phase 2's distortion adapted to 9-cell layout. Self-cell gets 0
-        (body state is internal; no environmental distortion applies)."""
+        """Phase 2 distortion adapted to 9-cell layout. Self-cell unaffected
+        (body state is internal; environmental distortion does not apply)."""
         scale = float(self.cfg.perturbation_scale)
         n_cells = len(self.cfg3.patch_order)
         distortion = np.zeros(n_cells, dtype=np.float32)
         for i, (dx, dy) in enumerate(self.cfg3.patch_order):
             if dx == 0 and dy == 0:
-                continue  # self-cell unaffected
+                continue
             px, _ = self._patch_coord(self.x + dx, self.y + dy)
             distortion[i] = scale * self._inversion_pattern[px]
         return distortion
@@ -238,7 +269,6 @@ class NZonePhase3Env(NZonePhase2Env):
     def step(self, action: int):
         moved = (action != self.ACTION_STAY)
 
-        # Phase 2 movement
         dx, dy = 0, 0
         if action == self.ACTION_UP:
             dy = -1
@@ -253,10 +283,8 @@ class NZonePhase3Env(NZonePhase2Env):
         self.visited.add((self.x, self.y))
         self._update_perturbation()
 
-        # Phase 3 body dynamics
         self._update_body_state(moved=moved)
 
-        # Termination
         terminated = False
         if (
             self.cfg3.terminate_on_body_min
@@ -293,16 +321,10 @@ class NZonePhase3Env(NZonePhase2Env):
         seed: Optional[int] = None,
         options: Optional[Dict] = None,
     ):
-        # Phase 2 reset handles position, perturbation schedule, etc.
         _, _ = super().reset(seed=seed, options=options)
-
-        # Reset body state
         self.body_state = np.array([self.cfg3.body_init], dtype=np.float32)
         self._last_metabolic_delta = 0.0
         self._last_affordance_gain = 0.0
-
-        # Re-observe with body state initialized (super().reset returned an
-        # observation built before we reset body_state, so rebuild it)
         obs = self._observe()
         info = self._info_dict()
         return obs, info
@@ -313,6 +335,7 @@ class NZonePhase3Env(NZonePhase2Env):
         info = super()._info_dict()
         info["body_state"] = float(self.body_state[0])
         info["affordance_here"] = float(self._affordance_map[self.y, self.x])
+        info["valence_zone_id"] = int(self.valence_zone_id(self.y))
         info["metabolic_delta"] = float(self._last_metabolic_delta)
         info["affordance_gain"] = float(self._last_affordance_gain)
         return info
@@ -327,27 +350,34 @@ def make_env(**kwargs) -> NZonePhase3Env:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Minimal smoke test: reset, step a few times, verify shapes & body dynamics.
     env = make_env()
     obs, info = env.reset(seed=0)
-    print(f"obs shape: {obs.shape}  (expected (18,) without include_xy)")
+    print(f"obs shape: {obs.shape}  (expected (18,))")
     print(f"observation_space: {env.observation_space}")
-    print(f"initial body_state: {info['body_state']}")
-    print(f"initial affordance_here: {info['affordance_here']}")
+    print(f"grid: {env.W} x {env.H}, start: ({env.x}, {env.y})")
+    print(f"initial body_state: {info['body_state']:.4f}")
+    print(f"initial affordance_here: {info['affordance_here']:+.4f}  "
+          f"(valence zone {info['valence_zone_id']})")
     print(f"perturbation_steps: {env.perturbation_steps}")
 
-    print("\nfirst 5 steps (alternating LEFT, RIGHT):")
-    for t in range(5):
-        action = env.ACTION_LEFT if t % 2 == 0 else env.ACTION_RIGHT
+    print(f"\naffordance map (vertical gradient, sample column 7):")
+    for y in range(env.H):
+        a = env._affordance_map[y, 7]
+        vz = env.valence_zone_id(y)
+        marker = "  <- agent start" if y == env.y else ""
+        print(f"  row {y:2d} (vz={vz}):  affordance={a:+.4f}{marker}")
+
+    print("\nfirst 10 steps (UP, UP, UP, UP, UP, STAY, STAY, DOWN, DOWN, DOWN):")
+    actions = [env.ACTION_UP] * 5 + [env.ACTION_STAY] * 2 + [env.ACTION_DOWN] * 3
+    for action in actions:
         obs, r, term, trunc, info = env.step(action)
-        # Read self-cell (channels 16, 17 in flat layout = index 8 * 2)
         self_ch0 = obs[2 * env.SELF_CELL_INDEX]
         self_ch1 = obs[2 * env.SELF_CELL_INDEX + 1]
+        action_name = ["UP", "DOWN", "LEFT", "RIGHT", "STAY"][action]
         print(
-            f"  t={info['t']:3d}  pos=({info['x']:2d},{info['y']:2d})  "
-            f"zone={info['zone_id']}  "
+            f"  t={info['t']:3d}  {action_name:5s}  pos=({info['x']:2d},{info['y']:2d})  "
+            f"vz={info['valence_zone_id']}  "
             f"body={info['body_state']:.4f}  "
             f"afford_here={info['affordance_here']:+.3f}  "
-            f"self_cell=(ch0={self_ch0:.3f}, ch1={self_ch1:.3f})  "
-            f"perturb={info['perturbation_active']}"
+            f"self=(b={self_ch0:.3f}, a={self_ch1:+.3f})"
         )
