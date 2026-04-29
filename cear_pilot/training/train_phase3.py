@@ -307,11 +307,12 @@ def train(args):
                     "block_id": block_id,
                     "gating_mode": agent.cfg.encoder.gating_mode,
                 }
-                for gi in range(z_dim):
+                for gi in range(len(g_np)):
                     row[f"g_{gi}"] = float(g_np[gi])
-                    row[f"gamma_{gi}"] = float(gamma_np[gi])
-                    row[f"beta_{gi}"] = float(beta_np[gi])
-                    row[f"salience_{gi}"] = float(salience_np[gi])
+                for zi in range(z_dim):
+                    row[f"gamma_{zi}"] = float(gamma_np[zi])
+                    row[f"beta_{zi}"] = float(beta_np[zi])
+                    row[f"salience_{zi}"] = float(salience_np[zi])
                 traj_rows.append(row)
 
             obs = obs_next
