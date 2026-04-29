@@ -99,6 +99,7 @@ def build_agent_and_decoder(args):
         g_dim=12,
         hidden=64,
         use_salience_gate=True,
+        gating_mode=args.gating_mode,
     )
 
     world_cfg = WorldLatentConfig(
@@ -275,14 +276,17 @@ def train(args):
 
             if args.save_traj:
                 g_np = out["g"].detach().cpu().numpy()[0]
-                gamma_np = np.zeros(agent.cfg.encoder.z_dim)
-                beta_np = np.zeros(agent.cfg.encoder.z_dim)
-                if hasattr(agent.enc.obs_enc, "film"):
-                    with torch.no_grad():
-                        gb = agent.enc.obs_enc.film(out["g"].detach())
-                        gam, bet = gb.chunk(2, dim=-1)
-                        gamma_np = gam.cpu().numpy()[0]
-                        beta_np = bet.cpu().numpy()[0]
+                z_dim = agent.cfg.encoder.z_dim
+
+                # mode-aware gating params via introspection helper
+                with torch.no_grad():
+                    gp = agent.enc.obs_enc.gating_params(out["g"].detach())
+                gamma_np = (gp["gamma"].cpu().numpy()[0]
+                            if "gamma" in gp else np.zeros(z_dim))
+                beta_np = (gp["beta"].cpu().numpy()[0]
+                           if "beta" in gp else np.zeros(z_dim))
+                salience_np = (gp["salience"].cpu().numpy()[0]
+                               if "salience" in gp else np.zeros(z_dim))
 
                 row = {
                     "episode": global_ep, "t": int(info["t"]),
@@ -301,12 +305,13 @@ def train(args):
                     "perturbation_trace": float(info.get("perturbation_trace", 0.0)),
                     "n_perturb_setting": n_perturb_now,
                     "block_id": block_id,
+                    "gating_mode": agent.cfg.encoder.gating_mode,
                 }
-                for gi in range(len(g_np)):
+                for gi in range(z_dim):
                     row[f"g_{gi}"] = float(g_np[gi])
-                for gi in range(len(gamma_np)):
                     row[f"gamma_{gi}"] = float(gamma_np[gi])
                     row[f"beta_{gi}"] = float(beta_np[gi])
+                    row[f"salience_{gi}"] = float(salience_np[gi])
                 traj_rows.append(row)
 
             obs = obs_next
@@ -385,6 +390,11 @@ def parse_args():
 
     # Body loss weight (training scaling, not runtime preference)
     ap.add_argument("--body_loss_weight", type=float, default=1.0)
+
+    # Encoder gating mode: phase 3 Frame 1 commitment defaults to "salience".
+    # Use "film" for backward-compat with phase 1-2 architecture comparison.
+    ap.add_argument("--gating_mode", type=str, default="film",
+                    choices=["film", "salience", "both"])
 
     ap.add_argument("--mixed_schedule", type=str, default="",
                     help="Block schedule: 'n_perturb:episodes,...'")
