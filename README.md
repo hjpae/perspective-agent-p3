@@ -2,6 +2,8 @@
 
 ## Vast.ai instance setup 
 
+Generate the SSH key:  
+
 ```bash
 git config --global user.name "hjpae"
 git config --global user.email "hnjpae@gmail.com"
@@ -12,15 +14,21 @@ ssh-add ~/.ssh/id_ed25519
 cat ~/.ssh/id_ed25519.pub
 ```
 
+Add SSH key and then authorize connection to GitHub:  
+
 ```bash
 ssh -T git@github.com
 ```
+
+Clone the repository:  
 
 ```bash
 git clone git@github.com:hjpae/perspective-agent-p3.git
 cd perspective-agent-p3
 git remote -v
 ```
+
+If overwriting the existing repo, use this:  
 
 ```bash
 git remote remove origin
