@@ -4,14 +4,13 @@
 CEAR Agent.
 
 Phase 2: g_prev gates perception via FiLM (encoder).
-Phase 3 addition: body prediction error flows into AlphaNet as a separate
-channel (Option I). Mechanism:
-  - state head outputs (s, body_pred) when body_dim > 0
-  - body_pred(t-1) is stored on the agent
-  - at step t, body_actual_t (read from observation/info) is compared
-    against body_pred(t-1) to compute body_pe
-  - body_pe is passed to world_latent forward as body_err_t
-  - the world_latent's AlphaNet learns to weight env PE vs body PE
+Phase 3 additions:
+  - body PE flows into AlphaNet as a separate channel (Option I)
+  - encoder.gating_mode in {"film", "salience", "metric_c1", "both"}
+  - if encoder is metric_c1: M_g (Riemannian metric on z) is computed by the
+    encoder and passed through to the state head, which consumes it via
+    quadratic features (Form C-B). z_t is the *unmodulated z_raw* in this mode;
+    the modulation lives entirely in M_g, applied downstream.
 """
 
 from __future__ import annotations
@@ -48,14 +47,15 @@ class CEARAgent(nn.Module):
         assert cfg.encoder.z_dim == cfg.state.z_dim
         assert cfg.encoder.p_dim == cfg.state.p_dim
         assert cfg.state.s_dim == cfg.policy.s_dim
-        # Phase 3: state.body_dim must match world.body_err_dim if body
-        # PE is wired through. body_err_dim has the same dim as body_dim
-        # because PE = (pred - actual) is element-wise.
         if cfg.state.body_dim > 0:
             assert cfg.state.body_dim == cfg.world.body_err_dim, (
                 f"state.body_dim ({cfg.state.body_dim}) must equal "
                 f"world.body_err_dim ({cfg.world.body_err_dim})"
             )
+        # metric_c1 + use_metric must agree
+        if cfg.encoder.gating_mode == "metric_c1" and not cfg.state.use_metric:
+            raise ValueError("encoder gating_mode='metric_c1' requires "
+                             "state.use_metric=True")
 
         self.enc = EncoderBundle(cfg.encoder)
         self.world = WorldLatent(cfg.world)
@@ -67,21 +67,21 @@ class CEARAgent(nn.Module):
 
         self._g: Optional[torch.Tensor] = None
         self._alpha: Optional[torch.Tensor] = None
-        # Phase 3: body prediction from previous step (used to compute body PE
-        # at the *next* step when the actual next-step body is known).
         self._body_pred_prev: Optional[torch.Tensor] = None
 
     @property
     def has_body(self) -> bool:
         return self.cfg.state.body_dim > 0
 
+    @property
+    def has_metric(self) -> bool:
+        return self.cfg.encoder.gating_mode == "metric_c1"
+
     def reset(self, batch_size: int = 1) -> None:
         gd = self.cfg.world.g_dim
         self._g = torch.zeros((batch_size, gd), device=self.device_, dtype=torch.float32)
         self._alpha = torch.zeros((batch_size, 1), device=self.device_, dtype=torch.float32)
         if self.has_body:
-            # init body_pred at 0.5 (matches env body_init under default cfg);
-            # this gives a defined-but-uninformative first body PE.
             self._body_pred_prev = torch.full(
                 (batch_size, self.cfg.state.body_dim),
                 0.5,
@@ -113,37 +113,20 @@ class CEARAgent(nn.Module):
         err_t: Optional[torch.Tensor] = None,
         body_actual_t: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Phase 3 forward step.
-
-        Args:
-          x_t: observation (B, obs_dim)
-          p_t: proprioception (optional)
-          ablate_g: zero out g (ablation)
-          err_t: env prediction error feature (B, err_dim) for AlphaNet
-          body_actual_t: actual body state at time t (B, body_dim).
-                         Required if agent has body. Used to compute body PE
-                         against self._body_pred_prev (which is body_pred(t-1)
-                         pointing at the body at time t).
-        """
         if self._g is None:
             self.reset(batch_size=x_t.shape[0])
 
-        # Phase 3: body PE for AlphaNet
+        # Body PE (signed) — feedback signal, not a backprop path
         body_pe: Optional[torch.Tensor] = None
         if self.has_body and body_actual_t is not None and self._body_pred_prev is not None:
             body_actual_t = body_actual_t.to(self.device_).float()
-            # PE as signed error; AlphaNet receives this directly so it can
-            # learn signed vs squared weighting.
             body_pe = body_actual_t - self._body_pred_prev
-            body_pe = body_pe.detach()  # PE is a feedback signal, not a path
-                                        # for backprop into the previous step's
-                                        # body head (we train body head from
-                                        # next-step body label directly).
+            body_pe = body_pe.detach()
 
-        # encoder (Phase 2 FiLM gating preserved)
+        # encoder
         z_t, p_emb = self.enc(x_t, p_t, g_t=self._g)
 
+        # world latent — alpha modulated by env PE + body PE
         if ablate_g:
             g_t = torch.zeros_like(self._g)
             alpha_t = torch.zeros((x_t.shape[0], 1), device=x_t.device)
@@ -156,20 +139,22 @@ class CEARAgent(nn.Module):
             g_t = out_world["g"]
             alpha_t = out_world["alpha"]
 
-        # state head + (phase 3) body head
+        # state head — receives M_g if metric_c1
+        M_g: Optional[torch.Tensor] = None
+        if self.has_metric:
+            M_g = self.enc.obs_enc.build_metric(g_t)
+
         if self.has_body:
-            s_t, body_pred_t = self.state(z_t, p_emb, g_t)
+            s_t, body_pred_t = self.state(z_t, p_emb, g_t, M_g=M_g)
         else:
-            s_t = self.state(z_t, p_emb, g_t)
+            s_t = self.state(z_t, p_emb, g_t, M_g=M_g)
             body_pred_t = None
 
         logits = self.policy(s_t)
 
-        # update internal state
         self._g = g_t.detach()
         self._alpha = alpha_t.detach()
         if self.has_body and body_pred_t is not None:
-            # store for next step's PE computation
             self._body_pred_prev = body_pred_t.detach()
 
         out: Dict[str, torch.Tensor] = {
@@ -184,6 +169,8 @@ class CEARAgent(nn.Module):
             out["body_pred"] = body_pred_t
         if body_pe is not None:
             out["body_pe"] = body_pe
+        if M_g is not None:
+            out["M_g"] = M_g
         return out
 
     @torch.no_grad()

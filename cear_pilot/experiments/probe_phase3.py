@@ -224,18 +224,27 @@ def forward_probes(
     device: str = "cpu",
 ) -> Dict[str, np.ndarray]:
     """
-    For every (g, x) pair, single encoder forward, record:
-      - z         (encoded latent after gating)
-      - z_raw     (pre-gating encoded latent — should be probe-only,
-                   g-independent; sanity check)
+    For every (g, x) pair, single forward through encoder + state head's
+    metric machinery (when applicable), record:
+
+      - z_raw   pre-gating (encoder mlp output, tanh applied). g-independent.
+      - z       post-encoder representation. In metric_c1 mode, equals z_raw.
+                In film/salience modes, gating applied here.
       - mode-dependent gating params:
           film     → gamma, beta
           salience → salience
+          metric_c1 → M_g (z_dim, z_dim), and z_metric = M_g @ z_raw
           both     → gamma, beta, salience
 
-    Note: gating params are functions of g alone (not probe x), so they are
-    constant across the probe axis. Probe-dependence of the gating *effect*
-    must be measured via z (post-gating result), not raw gating params.
+    For metric_c1 mode, the *probe-dependent reorganization* signature lives
+    in z_quad = z_raw_outer (M_g @ z_raw). We compute it for analysis.
+
+    Critical for analysis:
+      - In film/salience modes, "z" is the meaningful post-gating output.
+      - In metric_c1 mode, the agent's gating effect appears in z_metric
+        (linear in z_raw) and z_quad (quadratic in z_raw — probe-dependent).
+        We expose all three (z=z_raw, z_metric, z_quad) so analysis code
+        can pick the right one.
     """
     agent.eval()
     n_g = g_states.shape[0]
@@ -244,9 +253,12 @@ def forward_probes(
 
     Z = np.zeros((n_g, n_p, z_dim), dtype=np.float32)
     Z_RAW = np.zeros((n_g, n_p, z_dim), dtype=np.float32)
+    Z_METRIC = np.zeros((n_g, n_p, z_dim), dtype=np.float32)
+    Z_QUAD = np.zeros((n_g, n_p, z_dim * z_dim), dtype=np.float32)
     GAMMA = np.zeros((n_g, n_p, z_dim), dtype=np.float32)
     BETA = np.zeros((n_g, n_p, z_dim), dtype=np.float32)
     SALIENCE = np.zeros((n_g, n_p, z_dim), dtype=np.float32)
+    M_G = np.zeros((n_g, n_p, z_dim, z_dim), dtype=np.float32)
 
     obs_enc = agent.enc.obs_enc
     mode = obs_enc.gating_mode
@@ -259,25 +271,37 @@ def forward_probes(
 
         for pi in range(n_p):
             x = x_tensor_full[pi:pi+1]
-            # Use the encoder's full forward to compute z (mode-correct)
-            z = obs_enc(x, g_t=g)
-            z_raw = torch.tanh(obs_enc.mlp(x))
+            z = obs_enc(x, g_t=g)               # post-gating in film/salience
+            z_raw = torch.tanh(obs_enc.mlp(x))   # encoder mlp output
 
             Z[gi, pi]     = z.cpu().numpy()[0]
             Z_RAW[gi, pi] = z_raw.cpu().numpy()[0]
+
             if "gamma" in gp:
                 GAMMA[gi, pi] = gp["gamma"].cpu().numpy()[0]
             if "beta" in gp:
                 BETA[gi, pi]  = gp["beta"].cpu().numpy()[0]
             if "salience" in gp:
                 SALIENCE[gi, pi] = gp["salience"].cpu().numpy()[0]
+            if "M_g" in gp:
+                M = gp["M_g"]                    # (1, z_dim, z_dim)
+                M_G[gi, pi] = M.cpu().numpy()[0]
+                # z_metric = M_g @ z_raw         (linear in z_raw)
+                Mz = torch.bmm(M, z_raw.unsqueeze(-1)).squeeze(-1)  # (1, z_dim)
+                Z_METRIC[gi, pi] = Mz.cpu().numpy()[0]
+                # z_quad[i, j] = z_raw[i] * (M_g z_raw)[j]   (quadratic)
+                z_outer = z_raw.unsqueeze(-1) * Mz.unsqueeze(-2)
+                Z_QUAD[gi, pi] = z_outer.reshape(1, -1).cpu().numpy()[0]
 
     return {
         "z": Z,
         "z_raw": Z_RAW,
+        "z_metric": Z_METRIC,
+        "z_quad": Z_QUAD,
         "gamma": GAMMA,
         "beta": BETA,
         "salience": SALIENCE,
+        "M_g": M_G,
         "mode": mode,
     }
 
@@ -286,47 +310,78 @@ def forward_probes(
 # Q1: Same x / different g → different gating?
 # ---------------------------------------------------------------------------
 
+def _select_target(out: Dict[str, np.ndarray]) -> np.ndarray:
+    """
+    Select the meaningful measurement target based on mode:
+      - film/salience/both: 'z' (post-gating output)
+      - metric_c1:          'z_quad' (quadratic features — where probe-dependent
+                            reorganization actually lives in this architecture)
+
+    For metric_c1, returning z (= z_raw) would show no g effect at all, since
+    z is unmodulated in this mode. The phenomenological gating effect is
+    realized when state head consumes z_quad downstream — that's the actual
+    representation conditioning agent behavior.
+    """
+    mode = out.get("mode", "film")
+    if mode == "metric_c1":
+        return out["z_quad"]
+    return out["z"]
+
+
 def q1_summary(out: Dict[str, np.ndarray]) -> Dict[str, float]:
     """
-    Q1: does same x produce different z under different g?
+    Q1: does same x produce different processed-z under different g?
 
-    Primary metric: variance of z across g states, per probe.
+    Primary metric (target = z_quad in metric_c1, z elsewhere):
+      var across g states, per probe, then averaged.
+
     Sanity: variance of z_raw across g should be ~0 (encoder mlp doesn't see g).
-    Reference: variance of z across probes (purely content-driven variance).
+    Reference: variance of target across probes (purely content-driven variance).
 
     g_to_probe_ratio compares the magnitude of g-induced variation to
-    probe-content variation. ~1 means g effect comparable to content effect.
+    probe-content variation.
     """
-    Z = out["z"]
+    target = _select_target(out)
     Z_RAW = out["z_raw"]
     mode = out.get("mode", "film")
 
-    var_z_across_g     = float(Z.var(axis=0).mean())
-    var_zraw_across_g  = float(Z_RAW.var(axis=0).mean())  # sanity: ~0
-    var_z_across_probes    = float(Z.var(axis=1).mean())
-    var_zraw_across_probes = float(Z_RAW.var(axis=1).mean())
-    g_to_probe_ratio = var_z_across_g / max(var_z_across_probes, 1e-9)
+    var_target_across_g     = float(target.var(axis=0).mean())
+    var_zraw_across_g       = float(Z_RAW.var(axis=0).mean())  # sanity: ~0
+    var_target_across_probes = float(target.var(axis=1).mean())
+    var_zraw_across_probes  = float(Z_RAW.var(axis=1).mean())
+    g_to_probe_ratio = var_target_across_g / max(var_target_across_probes, 1e-9)
 
     result = {
         "mode": mode,
-        "var_z_across_g": var_z_across_g,
+        "target": "z_quad" if mode == "metric_c1" else "z",
+        "var_target_across_g": var_target_across_g,
         "var_zraw_across_g_sanity": var_zraw_across_g,
-        "var_z_across_probes": var_z_across_probes,
+        "var_target_across_probes": var_target_across_probes,
         "var_zraw_across_probes": var_zraw_across_probes,
         "g_to_probe_ratio": g_to_probe_ratio,
     }
 
-    # Mode-specific gating param diagnostics (these are functions of g alone,
-    # so var across g is meaningful — quantifies how much the gating itself
-    # varies across stances).
+    # Mode-specific gating param diagnostics
     if mode in ("film", "both"):
         result["var_gamma_across_g"] = float(out["gamma"].var(axis=0).mean())
         result["var_beta_across_g"]  = float(out["beta"].var(axis=0).mean())
     if mode in ("salience", "both"):
         result["var_salience_across_g"] = float(out["salience"].var(axis=0).mean())
-        # Also report mean salience: 0.5 = neutral, deviation indicates learned bias
         result["mean_salience"] = float(out["salience"].mean())
         result["std_salience"]  = float(out["salience"].std())
+    if mode == "metric_c1":
+        # M_g eigenstructure summary: anisotropy across g states
+        M = out["M_g"]   # (n_g, n_p, z_dim, z_dim) — but constant across probes
+        # use g-axis only (collapse probe axis since M_g is g-only function)
+        M_per_g = M[:, 0, :, :]   # (n_g, z_dim, z_dim)
+        eigs = np.linalg.eigvalsh(M_per_g)   # (n_g, z_dim) ascending
+        result["mean_max_eigenvalue"] = float(eigs[:, -1].mean())
+        result["mean_min_eigenvalue"] = float(eigs[:, 0].mean())
+        result["mean_condition_number"] = float(
+            (eigs[:, -1] / np.maximum(eigs[:, 0], 1e-9)).mean()
+        )
+        # variance of eigenvalues across g states — how much M_g changes with stance
+        result["var_max_eigenvalue_across_g"] = float(eigs[:, -1].var())
 
     return result
 
@@ -337,26 +392,27 @@ def q1_summary(out: Dict[str, np.ndarray]) -> Dict[str, float]:
 
 def q2_consistency(out: Dict[str, np.ndarray]) -> Dict[str, float]:
     """
-    For each (g_A, g_B) pair: compute per-probe delta = z(g_A) - z(g_B).
+    For each (g_A, g_B) pair: per-probe delta = target(g_A) - target(g_B).
     Mean pairwise cosine similarity of delta vectors across probes.
 
-    Note: we use Z (post-FiLM output), not raw GAMMA/BETA. Raw FiLM params
-    are functions of g alone, so their delta is trivially probe-independent
-    (cos = 1) by construction. Z applies the gating to z_raw, which depends
-    on probe x — measuring delta_Z reveals how much the *applied* gating
-    varies with probe.
+    Target: z (film/salience/both) or z_quad (metric_c1) — the representation
+    that actually conditions agent's downstream behavior.
 
     cos ≈ 1 → probe-independent shift in latent space
     cos < 1 → probe-dependent component exists (Frame 1's stronger signature)
     cos ≈ 0 → strongly probe-dependent
+
+    metric_c1's expectation: z_quad is *quadratic* in z_raw, so per-probe
+    delta vectors should be more probe-dependent (lower consistency) than
+    in film/salience modes where target is linear in z_raw.
     """
-    Z = out["z"]
-    n_g, n_p, _ = Z.shape
+    target = _select_target(out)
+    n_g, n_p, _ = target.shape
 
     pairwise = []
     for ga in range(n_g):
         for gb in range(ga + 1, n_g):
-            deltas = Z[ga] - Z[gb]
+            deltas = target[ga] - target[gb]
             norms = np.linalg.norm(deltas, axis=-1, keepdims=True) + 1e-9
             unit = deltas / norms
             cos = unit @ unit.T
@@ -374,39 +430,32 @@ def q2_consistency(out: Dict[str, np.ndarray]) -> Dict[str, float]:
 
 def q2_linear_transform(out: Dict[str, np.ndarray]) -> Dict[str, float]:
     """
-    For each pair (g_A, g_B): fit linear map z(g_B, x) ≈ W z(g_A, x) + b.
+    For each pair (g_A, g_B): fit linear map target(g_B, x) ≈ W target(g_A, x) + b.
     R^2 across probes per pair.
 
     Architecture-dependent interpretation:
 
-      mode="film":     z(g, x) = (1+gamma(g))*z_raw(x) + beta(g) is affine in
-                       z_raw, so a linear map between any two g states *exists
-                       by construction*. R^2 = 1 is trivial and uninformative.
+      mode="film"/"salience"/"both": target is linear-in-z_raw, so by
+        construction R^2 = 1 trivially. Reported only for completeness.
 
-      mode="salience": z(g, x) = z_raw(x) * sigmoid(s(g)) is element-wise
-                       multiplicative — also linear in z_raw, so any two
-                       g states are related by a *diagonal* linear map.
-                       Standard linear R^2 will still be ~1.
+      mode="metric_c1": target = z_quad is *quadratic* in z_raw. A linear
+        map between z_quad(g_A, x) and z_quad(g_B, x) is NO LONGER guaranteed
+        to fit perfectly. R^2 < 1 here is meaningful: it quantifies how much
+        the g-induced transformation differs from a single global linear map
+        across probes — i.e., how much probe-dependent reorganization occurs.
 
-      mode="both":     z(g, x) = ((1+gamma)*z_raw + beta) * sigmoid(s) — still
-                       a linear function of z_raw per fixed g (it's the
-                       composition of two affine ops in z_raw). Linear R^2 ~ 1
-                       again expected.
-
-    In other words: as long as gating is g-dependent but linear-in-z_raw, this
-    metric is uninformative. Reported for completeness.
-
-    To detect *probe-dependent* transformations one needs to look at Q2(a)
-    consistency or Q2(d) probe-dependence, not this metric.
+    Caveat for film/salience: even though R^2 ≈ 1, the consistency metric
+    (Q2(a)) still captures probe-dependence via cosine alignment of deltas.
+    Both metrics should be read together.
     """
-    Z = out["z"]
-    n_g, n_p, d = Z.shape
+    target = _select_target(out)
+    n_g, n_p, d = target.shape
 
     r2 = []
     for ga in range(n_g):
         for gb in range(ga + 1, n_g):
-            X = Z[ga]
-            Y = Z[gb]
+            X = target[ga]
+            Y = target[gb]
             X_aug = np.concatenate([X, np.ones((n_p, 1))], axis=1)
             sol, *_ = np.linalg.lstsq(X_aug, Y, rcond=None)
             Y_hat = X_aug @ sol
@@ -425,13 +474,13 @@ def q2_linear_transform(out: Dict[str, np.ndarray]) -> Dict[str, float]:
 def q2_cluster_structure(out: Dict[str, np.ndarray],
                          meta_g: pd.DataFrame) -> Dict[str, float]:
     """
-    Average z (post-FiLM) across probes → one descriptor per g.
+    Average target across probes → one descriptor per g.
     Compute silhouette using candidate labels (body, perturb, valence_zone).
 
     silhouette > 0.3 → meaningful clustering by that label.
     """
-    Z = out["z"]
-    g_descriptors = Z.mean(axis=1)
+    target = _select_target(out)
+    g_descriptors = target.mean(axis=1)
 
     results = {}
     if "body_state" in meta_g.columns:
@@ -482,12 +531,11 @@ def _silhouette(X: np.ndarray, labels: np.ndarray) -> float:
 
 def q2_probe_dependence(out: Dict[str, np.ndarray]) -> Dict[str, float]:
     """
-    Spread of z across g states, per probe — is it uniform (probe-independent)
-    or variable (probe-dependent)?
+    Spread of target across g states, per probe.
     CoV high → some probes much more stance-sensitive than others.
     """
-    Z = out["z"]
-    spread_per_probe = Z.var(axis=0).sum(axis=-1)
+    target = _select_target(out)
+    spread_per_probe = target.var(axis=0).sum(axis=-1)
     cov = float(spread_per_probe.std() / max(spread_per_probe.mean(), 1e-9))
     return {
         "spread_mean": float(spread_per_probe.mean()),
@@ -506,6 +554,7 @@ def save_raw(out: Dict[str, np.ndarray],
              meta_g: pd.DataFrame, meta_probes: pd.DataFrame,
              outdir: Path) -> None:
     n_g, n_p, z_dim = out["z"].shape
+    mode = out.get("mode", "film")
     rows = []
     for gi in range(n_g):
         for pi in range(n_p):
@@ -520,17 +569,57 @@ def save_raw(out: Dict[str, np.ndarray],
                 "probe_y": int(meta_probes.iloc[pi]["y"]),
                 "probe_column_zone": int(meta_probes.iloc[pi]["column_zone"]),
                 "probe_valence_zone": int(meta_probes.iloc[pi]["valence_zone"]),
+                "mode": mode,
             }
             for d in range(z_dim):
                 row[f"z_{d}"]     = float(out["z"][gi, pi, d])
-                row[f"gamma_{d}"] = float(out["gamma"][gi, pi, d])
-                row[f"beta_{d}"]  = float(out["beta"][gi, pi, d])
                 row[f"z_raw_{d}"] = float(out["z_raw"][gi, pi, d])
+
+            if mode in ("film", "both"):
+                for d in range(z_dim):
+                    row[f"gamma_{d}"] = float(out["gamma"][gi, pi, d])
+                    row[f"beta_{d}"]  = float(out["beta"][gi, pi, d])
+            if mode in ("salience", "both"):
+                for d in range(z_dim):
+                    row[f"salience_{d}"] = float(out["salience"][gi, pi, d])
+            if mode == "metric_c1":
+                for d in range(z_dim):
+                    row[f"z_metric_{d}"] = float(out["z_metric"][gi, pi, d])
+                # store M_g eigenvalues only (M_g itself = 256 floats too large)
+                M = out["M_g"][gi, pi]   # (z_dim, z_dim)
+                eigs = np.linalg.eigvalsh(M)  # ascending
+                for d in range(z_dim):
+                    row[f"M_eig_{d}"] = float(eigs[d])
+                # also store the trace and log-determinant as compact summaries
+                row["M_trace"] = float(np.trace(M))
+                # log-det via Cholesky for stability
+                try:
+                    L = np.linalg.cholesky(M)
+                    row["M_logdet"] = float(2.0 * np.sum(np.log(np.diag(L))))
+                except np.linalg.LinAlgError:
+                    row["M_logdet"] = float("nan")
             rows.append(row)
     df = pd.DataFrame(rows)
     out_path = outdir / "probe_results.parquet"
     df.to_parquet(out_path, index=False)
     print(f"[save] {out_path}  ({len(df)} rows)")
+
+    # In metric_c1 mode, also save z_quad as separate parquet (z_dim^2 = 256
+    # extra columns would bloat probe_results; downstream analysis can load on
+    # demand)
+    if mode == "metric_c1":
+        n_quad = out["z_quad"].shape[-1]
+        rows_q = []
+        for gi in range(n_g):
+            for pi in range(n_p):
+                row = {"g_id": gi, "probe_id": pi}
+                for d in range(n_quad):
+                    row[f"zq_{d}"] = float(out["z_quad"][gi, pi, d])
+                rows_q.append(row)
+        df_q = pd.DataFrame(rows_q)
+        out_q = outdir / "probe_zquad.parquet"
+        df_q.to_parquet(out_q, index=False)
+        print(f"[save] {out_q}  ({len(df_q)} rows × {n_quad} z_quad dims)")
 
 
 # ---------------------------------------------------------------------------

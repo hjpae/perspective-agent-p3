@@ -115,6 +115,8 @@ def build_agent_and_decoder(args):
         body_err_dim=BODY_DIM,
     )
 
+    # Auto-set use_metric based on encoder mode
+    use_metric = (args.gating_mode == "metric_c1")
     state_cfg = StateHeadConfig(
         z_dim=enc_cfg.z_dim,
         p_dim=enc_cfg.p_dim,
@@ -123,6 +125,7 @@ def build_agent_and_decoder(args):
         hidden=64,
         body_dim=BODY_DIM,
         body_hidden=32,
+        use_metric=use_metric,
     )
 
     policy_cfg = PolicyConfig(
@@ -287,6 +290,14 @@ def train(args):
                            if "beta" in gp else np.zeros(z_dim))
                 salience_np = (gp["salience"].cpu().numpy()[0]
                                if "salience" in gp else np.zeros(z_dim))
+                # Metric_c1 mode: capture M_g eigenvalues (compact summary).
+                # Full M_g (z_dim^2 = 256 floats) is too large for traj rows;
+                # eigenvalues capture metric anisotropy structure.
+                if "M_g" in gp:
+                    M = gp["M_g"][0].cpu().numpy()  # (z_dim, z_dim)
+                    eigs = np.linalg.eigvalsh(M)    # ascending
+                else:
+                    eigs = np.zeros(z_dim)
 
                 row = {
                     "episode": global_ep, "t": int(info["t"]),
@@ -313,6 +324,7 @@ def train(args):
                     row[f"gamma_{zi}"] = float(gamma_np[zi])
                     row[f"beta_{zi}"] = float(beta_np[zi])
                     row[f"salience_{zi}"] = float(salience_np[zi])
+                    row[f"M_g_eig_{zi}"] = float(eigs[zi])
                 traj_rows.append(row)
 
             obs = obs_next
@@ -392,10 +404,10 @@ def parse_args():
     # Body loss weight (training scaling, not runtime preference)
     ap.add_argument("--body_loss_weight", type=float, default=1.0)
 
-    # Encoder gating mode: phase 3 Frame 1 commitment defaults to "salience".
-    # Use "film" for backward-compat with phase 1-2 architecture comparison.
+    # Encoder gating mode. metric_c1 is the Phase 3 main commitment;
+    # film and salience are sanity-check baselines.
     ap.add_argument("--gating_mode", type=str, default="film",
-                    choices=["film", "salience", "both"])
+                    choices=["film", "salience", "metric_c1", "both"])
 
     ap.add_argument("--mixed_schedule", type=str, default="",
                     help="Block schedule: 'n_perturb:episodes,...'")
