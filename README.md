@@ -42,7 +42,7 @@ Create the conda environment:
 
 ```bash
 conda env create -f environment.yml
-conda activate cearlab-phase3
+conda activate cear-phase3
 ```
 
 Install PyTorch separately if needed:  
