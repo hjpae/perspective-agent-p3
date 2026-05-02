@@ -1,0 +1,44 @@
+[load] agent restored from outputs/multiseed/salience/seed_17/ckpt_final.pt
+[sample_g] 90000 rows in traj; g_dim=12; strategy=stratified
+[sample_g] sampled 20 g states
+[probes] built 27 probes covering 9 strata
+[forward] z (20, 27, 16)  gamma (20, 27, 16)  z_raw (20, 27, 16)
+
+=== Q1: Same x / different g → different gating? ===
+  mode: salience
+  target: z
+  var_target_across_g: 0.005620
+  var_zraw_across_g_sanity: 0.000000
+  var_target_across_probes: 0.170319
+  var_zraw_across_probes: 0.280996
+  g_to_probe_ratio: 0.032995
+  var_salience_across_g: 0.010353
+  mean_salience: 0.736117
+  std_salience: 0.203178
+
+=== Q2 (a): Per-pair delta consistency across probes ===
+  mean_pairwise_consistency: +0.5018
+  std_pairwise_consistency: +0.1930
+  min_pairwise_consistency: +0.1780
+  max_pairwise_consistency: +0.8876
+
+=== Q2 (b): Linear transform R^2 between g pairs ===
+  mean_linear_R2: 1.0000
+  std_linear_R2: 0.0000
+  min_linear_R2: 1.0000
+  max_linear_R2: 1.0000
+
+=== Q2 (c): Cluster structure of g-descriptors ===
+  silhouette_body: +0.2400
+  silhouette_perturb: -0.0088
+  silhouette_valence_zone: +0.2915
+
+=== Q2 (d): Probe-dependence of g spread ===
+  spread_mean: 0.0899
+  spread_std: 0.0272
+  spread_cov: 0.3029
+  spread_min: 0.0447
+  spread_max: 0.1286
+[save] outputs/multiseed/salience/seed_17/probe/probe_results.parquet  (540 rows)
+
+[done]

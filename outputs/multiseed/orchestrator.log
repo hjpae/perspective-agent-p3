@@ -1,0 +1,18 @@
+[2026-05-01 15:59:30] === multi-seed parallel run starting ===
+  archs:      salience metric_c1
+  seeds:      [0, 20)  (n=20)
+  episodes:   300
+  device:     cuda
+  GPU mode:   shared GPU 0
+  N_GPU seen: 1
+  output:     outputs/multiseed
+[2026-05-01 15:59:30] launched arch=salience pid=1416  GPU=0
+[2026-05-01 15:59:30] [salience] worker starting on GPU=0
+[2026-05-01 15:59:32] launched arch=metric_c1 pid=1498  GPU=0
+[2026-05-01 15:59:32] [metric_c1] worker starting on GPU=0
+[2026-05-01 23:18:25] [salience] worker finished
+[2026-05-02 02:00:11] [metric_c1] worker finished
+
+[2026-05-02 02:00:11] === multi-seed run completed ===
+Aggregate with:
+  python -m cear_pilot.experiments.aggregate_multiseed --root outputs/multiseed
