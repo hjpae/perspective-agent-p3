@@ -1,0 +1,49 @@
+[2026-05-05 22:18:26] worker starting on GPU=0
+[2026-05-05 22:18:26] [1/5] seed=0
+  [run]  training...
+[2026-05-05 22:19:03] worker starting on GPU=0
+[2026-05-05 22:19:03] [1/5] seed=0
+  [run]  training...
+  [ok]   training in 1397s
+  [run]  probe analysis...
+  [ok]   probe in 5s
+[2026-05-05 22:41:48] [2/5] seed=1
+  [run]  training...
+  [ok]   training in 1383s
+  [skip] probe already done
+[2026-05-05 22:42:06] [2/5] seed=1
+  [run]  training...
+  [ok]   training in 1405s
+  [run]  probe analysis...
+  [ok]   probe in 6s
+[2026-05-05 23:05:19] [3/5] seed=2
+  [run]  training...
+  [ok]   training in 1411s
+  [skip] probe already done
+[2026-05-05 23:05:37] [3/5] seed=2
+  [run]  training...
+  [ok]   training in 1410s
+  [run]  probe analysis...
+  [ok]   probe in 5s
+[2026-05-05 23:28:54] [4/5] seed=3
+  [run]  training...
+  [ok]   training in 1418s
+  [skip] probe already done
+[2026-05-05 23:29:15] [4/5] seed=3
+  [run]  training...
+  [ok]   training in 1425s
+  [run]  probe analysis...
+  [ok]   probe in 5s
+[2026-05-05 23:52:44] [5/5] seed=4
+  [run]  training...
+  [ok]   training in 1415s
+  [skip] probe already done
+[2026-05-05 23:52:50] [5/5] seed=4
+  [run]  training...
+  [ok]   training in 1401s
+  [run]  probe analysis...
+  [ok]   probe in 6s
+[2026-05-06 00:16:17] worker finished
+  [ok]   training in 1420s
+  [skip] probe already done
+[2026-05-06 00:16:24] worker finished

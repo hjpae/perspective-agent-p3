@@ -1,0 +1,31 @@
+[build] Agent params: 28911
+[build] Decoder params: 6506
+[train] warmup=50 episodes (15000 steps), total=250 episodes
+[ep   10/250] [warmup] obs_PE=0.0555 body_PE=0.0140 ||g||=3.604 α=0.031 nP=4 blk=0 (57s)
+[ep   20/250] [warmup] obs_PE=0.0746 body_PE=0.0006 ||g||=3.647 α=0.030 nP=4 blk=0 (114s)
+[ep   30/250] [warmup] obs_PE=0.0423 body_PE=0.0003 ||g||=3.580 α=0.030 nP=4 blk=0 (169s)
+[ep   40/250] [warmup] obs_PE=0.0847 body_PE=0.0004 ||g||=3.648 α=0.030 nP=4 blk=0 (225s)
+[ep   50/250] [warmup] obs_PE=0.0271 body_PE=0.0004 ||g||=3.767 α=0.030 nP=4 blk=0 (278s)
+[ep   60/250] [actor ] obs_PE=0.0672 body_PE=0.0002 ||g||=3.781 α=0.074 nP=4 blk=0 (332s)
+[ep   70/250] [actor ] obs_PE=0.0132 body_PE=0.0001 ||g||=3.683 α=0.032 nP=4 blk=0 (385s)
+[ep   80/250] [actor ] obs_PE=0.0759 body_PE=0.0004 ||g||=3.755 α=0.062 nP=4 blk=0 (437s)
+[ep   90/250] [actor ] obs_PE=0.0678 body_PE=0.0020 ||g||=3.755 α=0.031 nP=4 blk=0 (492s)
+[ep  100/250] [actor ] obs_PE=0.0638 body_PE=0.0024 ||g||=3.732 α=0.030 nP=4 blk=0 (546s)
+[ep  110/250] [actor ] obs_PE=0.0570 body_PE=0.0002 ||g||=3.647 α=0.030 nP=4 blk=0 (600s)
+[ep  120/250] [actor ] obs_PE=0.0696 body_PE=0.0027 ||g||=3.444 α=0.030 nP=4 blk=0 (657s)
+[ep  130/250] [actor ] obs_PE=0.0843 body_PE=0.0040 ||g||=3.359 α=0.033 nP=4 blk=0 (714s)
+[ep  140/250] [actor ] obs_PE=0.0825 body_PE=0.0011 ||g||=3.220 α=0.200 nP=4 blk=0 (769s)
+[ep  150/250] [actor ] obs_PE=0.0686 body_PE=0.0004 ||g||=3.300 α=0.094 nP=4 blk=0 (827s)
+[ep  160/250] [actor ] obs_PE=0.0749 body_PE=0.0016 ||g||=3.067 α=0.205 nP=4 blk=0 (882s)
+[ep  170/250] [actor ] obs_PE=0.0882 body_PE=0.0003 ||g||=2.530 α=0.033 nP=4 blk=0 (937s)
+[ep  180/250] [actor ] obs_PE=0.0747 body_PE=0.0002 ||g||=3.008 α=0.100 nP=4 blk=0 (992s)
+[ep  190/250] [actor ] obs_PE=0.0701 body_PE=0.0004 ||g||=3.147 α=0.296 nP=4 blk=0 (1046s)
+[ep  200/250] [actor ] obs_PE=0.0677 body_PE=0.0001 ||g||=3.236 α=0.050 nP=4 blk=0 (1102s)
+[ep  210/250] [actor ] obs_PE=0.0764 body_PE=0.0003 ||g||=3.045 α=0.030 nP=4 blk=0 (1158s)
+[ep  220/250] [actor ] obs_PE=0.0635 body_PE=0.0002 ||g||=3.167 α=0.067 nP=4 blk=0 (1215s)
+[ep  230/250] [actor ] obs_PE=0.0710 body_PE=0.0009 ||g||=2.988 α=0.030 nP=4 blk=0 (1267s)
+[ep  240/250] [actor ] obs_PE=0.0682 body_PE=0.0001 ||g||=3.250 α=0.040 nP=4 blk=0 (1321s)
+[ep  250/250] [actor ] obs_PE=0.0692 body_PE=0.0001 ||g||=3.138 α=0.035 nP=4 blk=0 (1374s)
+[save] outputs/multiseed_pilot/salience/seed_00/traj.parquet (75000 rows)
+[save] outputs/multiseed_pilot/salience/seed_00/ckpt_final.pt
+

@@ -1,0 +1,67 @@
+nohup: ignoring input
+[2026-05-05 22:18:26] === pilot multi-seed run starting ===
+  archs:           salience metric_c1
+  seeds:           [0, 5)  (n=5)
+  episodes:        250 (warmup 50)
+  GPU mode:        shared GPU 0
+  N_GPU seen:      1
+  output:          outputs/multiseed_pilot
+[2026-05-05 22:18:26] launched arch=salience pid=2359  GPU=0
+[salience] [2026-05-05 22:18:26] worker starting on GPU=0
+[salience] [2026-05-05 22:18:26] [1/5] seed=0
+[salience]   [run]  training...
+[2026-05-05 22:18:28] launched arch=metric_c1 pid=2435  GPU=0
+[metric_c1] [2026-05-05 22:18:28] worker starting on GPU=0
+[metric_c1] [2026-05-05 22:18:28] [1/5] seed=0
+[metric_c1]   [run]  training...
+[salience]   [ok]   training in 1397s
+[salience]   [run]  probe analysis...
+[salience]   [ok]   probe in 5s
+[salience] [2026-05-05 22:41:48] [2/5] seed=1
+[salience]   [run]  training...
+[metric_c1]   [ok]   training in 1881s
+[metric_c1]   [run]  probe analysis...
+[metric_c1]   [ok]   probe in 7s
+[metric_c1] [2026-05-05 22:49:56] [2/5] seed=1
+[metric_c1]   [run]  training...
+[salience]   [ok]   training in 1405s
+[salience]   [run]  probe analysis...
+[salience]   [ok]   probe in 6s
+[salience] [2026-05-05 23:05:19] [3/5] seed=2
+[salience]   [run]  training...
+[metric_c1]   [ok]   training in 1912s
+[metric_c1]   [run]  probe analysis...
+[metric_c1]   [ok]   probe in 7s
+[metric_c1] [2026-05-05 23:21:55] [3/5] seed=2
+[metric_c1]   [run]  training...
+[salience]   [ok]   training in 1410s
+[salience]   [run]  probe analysis...
+[salience]   [ok]   probe in 5s
+[salience] [2026-05-05 23:28:54] [4/5] seed=3
+[salience]   [run]  training...
+[salience]   [ok]   training in 1425s
+[salience]   [run]  probe analysis...
+[salience]   [ok]   probe in 5s
+[salience] [2026-05-05 23:52:44] [5/5] seed=4
+[salience]   [run]  training...
+[metric_c1]   [ok]   training in 1916s
+[metric_c1]   [run]  probe analysis...
+[metric_c1]   [ok]   probe in 8s
+[metric_c1] [2026-05-05 23:53:59] [4/5] seed=3
+[metric_c1]   [run]  training...
+[salience]   [ok]   training in 1420s
+[salience]   [skip] probe already done
+[salience] [2026-05-06 00:16:24] worker finished
+[metric_c1]   [ok]   training in 1817s
+[metric_c1]   [run]  probe analysis...
+[metric_c1]   [ok]   probe in 8s
+[metric_c1] [2026-05-06 00:24:24] [5/5] seed=4
+[metric_c1]   [run]  training...
+[metric_c1]   [ok]   training in 1593s
+[metric_c1]   [run]  probe analysis...
+[metric_c1]   [ok]   probe in 6s
+[metric_c1] [2026-05-06 00:51:03] worker finished
+
+[2026-05-06 00:51:03] === pilot run completed ===
+Aggregate with:
+  python -m cear_pilot.experiments.aggregate_multiseed --root outputs/multiseed_pilot

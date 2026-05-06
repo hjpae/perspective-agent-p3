@@ -10,7 +10,8 @@ Differences from Phase 2:
   - State head has separate body-prediction head (state.body_dim = 1).
   - World latent receives body PE as separate AlphaNet channel
     (world.body_err_dim = 1).
-  - Loss = obs prediction error (existing) + body prediction error (new).
+  - Loss = obs prediction error + body prediction error + actor objective
+           (AAAI-style REINFORCE with PE as internal cost).
   - Trained from scratch (phase 1/2 obs-incompatible).
 
 Body PE flow:
@@ -21,9 +22,22 @@ Body PE flow:
   body_pred(t) is then computed by state head and stored for next step.
 
 Loss:
-  L_obs  = MSE(decoder(g_t, a_t), obs_{t+1})  — phase 2 style
-  L_body = MSE(body_pred_t, body_actual_{t+1}) — new
-  L_total = L_obs + body_loss_weight * L_body
+  L_obs    = MSE(decoder(g_t, a_t), obs_{t+1})        — phase 2 style
+  L_body   = MSE(body_pred_t, body_actual_{t+1})       — phase 3 specific
+  L_actor  = -(c_t - b_t) * log π(a_t | s_t)           — AAAI/phase 1 style
+             where c_t = MSE(decoder(g_t, a_t), obs_{t+1}) is action-
+             conditioned prediction error. Stop-gradient at policy state
+             ensures actor objective doesn't flow into perspective layer.
+  L_smooth = MSE(g_t, stopgrad(g_{t-1}))               — slow latent regularizer
+  L_ent    = -H(π(·|s_t))                              — entropy bonus
+  L_total  = L_obs + body_loss_weight * L_body
+            + w_actor * L_actor + w_smooth * L_smooth + w_ent * L_ent
+
+The actor objective is disabled during a warm-up phase (warmup_episodes
+episodes), during which only L_obs + L_body train the world model and
+body head. This follows AAAI/phase 1's commitment that the perspective
+formation cycle and policy optimization cycle remain separable: backbone
+must reach predictive stability before policy learning is introduced.
 
 The body_loss_weight is a *training-time* hyperparameter (gradient scaling),
 not a value-function weight. It only controls how strongly the body head is
@@ -57,6 +71,32 @@ from cear_pilot.models.decoder import ObsDecoder, DecoderConfig
 
 def count_params(module: nn.Module, only_trainable=False):
     return sum(p.numel() for p in module.parameters() if (not only_trainable or p.requires_grad))
+
+
+class EMAMeanVar:
+    """Exponential moving average tracker for advantage normalization
+    (AAAI/phase 1 style). Tracks mean and variance of a scalar stream."""
+    def __init__(self, beta: float = 0.99):
+        self.beta = beta
+        self.mean = 0.0
+        self.var = 1.0
+        self.initialized = False
+
+    def update(self, x: float) -> None:
+        if not self.initialized:
+            self.mean = float(x)
+            self.var = 1.0
+            self.initialized = True
+            return
+        m = self.beta * self.mean + (1.0 - self.beta) * float(x)
+        d = float(x) - self.mean
+        v = self.beta * self.var + (1.0 - self.beta) * d * d
+        self.mean = m
+        self.var = v
+
+    @property
+    def std(self) -> float:
+        return float(max(self.var, 1e-6) ** 0.5)
 
 
 ERR_DIM = 6
@@ -206,8 +246,23 @@ def train(args):
     n_actions = int(env.action_space.n)
     pe_ema_s, pe_ema_l, pe_prev = 0.05, 0.05, 0.05
 
+    # Actor advantage normalization (AAAI/phase 1 style)
+    baseline_stats = EMAMeanVar(beta=args.actor_baseline_beta)
+    adv_stats = EMAMeanVar(beta=args.actor_std_beta)
+
+    # Warm-up calculation: the actor objective is disabled until
+    # warmup_episodes have been completed. This follows AAAI's commitment
+    # that backbone (world model + body head) reaches predictive stability
+    # before policy learning is introduced.
+    warmup_episodes = int(max(0, args.warmup_episodes))
+    warmup_steps = warmup_episodes * args.max_steps  # for logging only
+    print(f"[train] warmup={warmup_episodes} episodes "
+          f"({warmup_steps} steps), total={len(ep_schedule)} episodes")
+
     agent.reset(batch_size=1)
+    g_prev = agent.get_latents()["g"].detach().clone()
     t0 = time.time()
+    global_step = 0
 
     for global_ep, (n_perturb_now, block_id) in enumerate(ep_schedule):
         env.cfg.n_perturbations = n_perturb_now
@@ -220,6 +275,7 @@ def train(args):
 
         # Reset agent latents and body_pred between episodes
         agent.reset(batch_size=1)
+        g_prev = agent.get_latents()["g"].detach().clone()
 
         while not done:
             x_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
@@ -242,7 +298,16 @@ def train(args):
                 err_t=err_t,
                 body_actual_t=body_actual_t,
             )
-            action = agent.policy.sample_action(out["logits"], greedy=args.greedy)
+            # logits returned by forward_step come from policy(s_t) WITHOUT
+            # stop-gradient. We compute a separate set of "actor logits" from
+            # detached s_t to enforce the AAAI commitment: actor objective
+            # must not flow into the perspective formation cycle.
+            logits_pred = out["logits"]                  # gradient-attached, not used for sampling here
+            s_t = out["s"]
+            logits_act = agent.policy(s_t.detach())      # detached → actor grad blocked at s
+            action = agent.policy.sample_action(
+                logits_act, greedy=args.greedy,
+            )
             a_int = int(action.item())
 
             obs_next, _, terminated, truncated, info_next = env.step(a_int)
@@ -254,14 +319,64 @@ def train(args):
                 dtype=torch.float32, device=device,
             )
 
-            # Loss: obs PE + body PE
-            pred_obs = decoder(out["g"], a_oh)
-            obs_loss = F.mse_loss(pred_obs, x_next)
+            # ─── World-model loss ───
+            # AAAI uses an action-conditioned mixture target; for phase 3 we
+            # follow the same logic. Predict obs under each candidate action,
+            # weight by the (detached) policy distribution. Then the executed
+            # action's prediction error serves as an internal cost for the
+            # actor objective.
+            xhat_all = decoder.predict_all_actions(out["g"])
+            # xhat_all: (B=1, A=n_actions, obs_dim)
+            with torch.no_grad():
+                pi_pred = torch.softmax(logits_pred, dim=-1)  # (1, A)
+            xhat_mix = (pi_pred.unsqueeze(-1) * xhat_all).sum(dim=1)  # (1, obs_dim)
+            obs_loss = F.mse_loss(xhat_mix, x_next)
 
-            body_pred_t = out["body_pred"]  # (1, 1)
+            # ─── Body loss ───
+            body_pred_t = out["body_pred"]               # (1, 1)
             body_loss = F.mse_loss(body_pred_t, body_actual_next)
 
-            total_loss = obs_loss + args.body_loss_weight * body_loss
+            # ─── Smoothness loss on g (slow latent regularizer) ───
+            smooth_loss = F.mse_loss(out["g"], g_prev.detach())
+
+            # ─── Actor loss (REINFORCE with action-conditioned PE as cost) ───
+            #   c_t = MSE(decoder(g_t, a_t), obs_{t+1})  — executed-action PE
+            #   advantage = (c_t - baseline) / std   (clipped)
+            #   L_actor = advantage * log π(a_t | s_t)
+            # Note: cost c_t is detached (treated as scalar advantage signal),
+            # so backprop from L_actor flows only through log π(a_t | s_t),
+            # i.e., into policy parameters. With s_t detached, no gradient
+            # reaches the perspective layer.
+            xhat_executed = xhat_all[0, a_int].unsqueeze(0)       # (1, obs_dim)
+            cost_t = F.mse_loss(xhat_executed, x_next).detach().item()
+            baseline_stats.update(cost_t)
+            advantage = cost_t - baseline_stats.mean
+            adv_stats.update(advantage)
+            adv_norm = float(np.clip(
+                advantage / max(adv_stats.std, 1e-6),
+                -args.adv_clip, args.adv_clip,
+            ))
+            log_pi_act = F.log_softmax(logits_act, dim=-1)[0, a_int]
+            actor_loss = -(adv_norm * log_pi_act)
+
+            # ─── Entropy regularizer ───
+            ent = -(F.softmax(logits_act, dim=-1)
+                    * F.log_softmax(logits_act, dim=-1)).sum(dim=-1)
+            ent_loss = -ent.mean()  # negate so reducing this *increases* entropy
+
+            # ─── Total loss with warm-up gating ───
+            # Actor objective is disabled during warmup_episodes.
+            # Smoothness and entropy can still be applied during warmup.
+            in_warmup = global_ep < warmup_episodes
+            w_actor_now = 0.0 if in_warmup else float(args.w_actor)
+
+            total_loss = (
+                obs_loss
+                + args.body_loss_weight * body_loss
+                + args.w_smooth * smooth_loss
+                + w_actor_now * actor_loss
+                + args.w_entropy * ent_loss
+            )
 
             optimizer.zero_grad()
             total_loss.backward()
@@ -276,6 +391,10 @@ def train(args):
             pe_prev = obs_pe_val
             ep_obs_pe.append(obs_pe_val)
             ep_body_pe.append(body_pe_val)
+
+            # advance g_prev for next-step smoothness
+            g_prev = out["g"].detach().clone()
+            global_step += 1
 
             if args.save_traj:
                 g_np = out["g"].detach().cpu().numpy()[0]
@@ -334,7 +453,8 @@ def train(args):
 
         if (global_ep + 1) % args.print_every == 0:
             elapsed = time.time() - t0
-            print(f"[ep {global_ep+1:4d}/{len(ep_schedule)}] "
+            phase_str = "warmup" if (global_ep < warmup_episodes) else "actor "
+            print(f"[ep {global_ep+1:4d}/{len(ep_schedule)}] [{phase_str}] "
                   f"obs_PE={np.mean(ep_obs_pe):.4f} "
                   f"body_PE={np.mean(ep_body_pe):.4f} "
                   f"||g||={out['g'].detach().cpu().norm().item():.3f} "
@@ -369,7 +489,7 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--episodes", type=int, default=150)
+    ap.add_argument("--episodes", type=int, default=250)
     ap.add_argument("--max_steps", type=int, default=300)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--clip_grad", type=float, default=1.0)
@@ -378,6 +498,18 @@ def parse_args():
     ap.add_argument("--greedy", action="store_true")
     ap.add_argument("--save_traj", action="store_true")
 
+    # AAAI/phase 1-style learning objective + warm-up
+    # Warm-up: actor objective disabled for the first warmup_episodes,
+    # during which only obs prediction + body prediction train the backbone.
+    # Default 50 episodes matches AAAI's ratio (~25% of training).
+    ap.add_argument("--warmup_episodes", type=int, default=50)
+    ap.add_argument("--w_actor", type=float, default=0.5)
+    ap.add_argument("--w_smooth", type=float, default=0.25)
+    ap.add_argument("--w_entropy", type=float, default=0.01)
+    ap.add_argument("--actor_baseline_beta", type=float, default=0.98)
+    ap.add_argument("--actor_std_beta", type=float, default=0.99)
+    ap.add_argument("--adv_clip", type=float, default=3.0)
+
     ap.add_argument("--update_mode", type=str, default="adaptive",
                     choices=["adaptive", "fixed"])
     ap.add_argument("--alpha_fixed", type=float, default=0.10)
@@ -385,8 +517,8 @@ def parse_args():
     ap.add_argument("--alpha_max", type=float, default=0.30)
 
     # Phase 3 env: perception
-    ap.add_argument("--sigma_left", type=float, default=0.20)
-    ap.add_argument("--sigma_right", type=float, default=0.10)
+    ap.add_argument("--sigma_left", type=float, default=0.40)
+    ap.add_argument("--sigma_right", type=float, default=0.05)
     ap.add_argument("--n_perturbations", type=int, default=4)
     ap.add_argument("--perturbation_duration", type=int, default=15)
     ap.add_argument("--perturbation_scale", type=float, default=0.12)
