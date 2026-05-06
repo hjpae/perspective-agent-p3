@@ -7,21 +7,21 @@
 === Q1: Same x / different g → different gating? ===
   mode: metric_c1
   target: z_quad
-  var_target_across_g: 0.055555
+  var_target_across_g: 0.177857
   var_zraw_across_g_sanity: 0.000000
-  var_target_across_probes: 0.047691
-  var_zraw_across_probes: 0.027995
-  g_to_probe_ratio: 1.164915
-  mean_max_eigenvalue: 10.732719
-  mean_min_eigenvalue: 0.105422
-  mean_condition_number: 105.757828
-  var_max_eigenvalue_across_g: 146.047043
+  var_target_across_probes: 0.177433
+  var_zraw_across_probes: 0.012117
+  g_to_probe_ratio: 1.002391
+  mean_max_eigenvalue: 25.418322
+  mean_min_eigenvalue: 0.106061
+  mean_condition_number: 251.072998
+  var_max_eigenvalue_across_g: 531.312622
 
 === Q2 (a): Per-pair delta consistency across probes ===
-  mean_pairwise_consistency: +0.4023
-  std_pairwise_consistency: +0.0192
-  min_pairwise_consistency: +0.3492
-  max_pairwise_consistency: +0.4368
+  mean_pairwise_consistency: +0.3768
+  std_pairwise_consistency: +0.0311
+  min_pairwise_consistency: +0.3191
+  max_pairwise_consistency: +0.4552
 
 === Q2 (b): Linear transform R^2 between g pairs ===
   mean_linear_R2: 1.0000
@@ -30,16 +30,16 @@
   max_linear_R2: 1.0000
 
 === Q2 (c): Cluster structure of g-descriptors ===
-  silhouette_body: -0.0550
-  silhouette_perturb: -0.0271
-  silhouette_valence_zone: +0.1371
+  silhouette_body: +0.0412
+  silhouette_perturb: -0.0688
+  silhouette_valence_zone: +nan
 
 === Q2 (d): Probe-dependence of g spread ===
-  spread_mean: 14.2222
-  spread_std: 14.4639
-  spread_cov: 1.0170
-  spread_min: 0.5742
-  spread_max: 51.4371
+  spread_mean: 45.5314
+  spread_std: 56.2273
+  spread_cov: 1.2349
+  spread_min: 0.2287
+  spread_max: 161.0944
 [save] outputs/multiseed_pilot/metric_c1/seed_03/probe/probe_results.parquet  (540 rows)
 [save] outputs/multiseed_pilot/metric_c1/seed_03/probe/probe_zquad.parquet  (540 rows × 256 z_quad dims)
 

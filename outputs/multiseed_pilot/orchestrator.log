@@ -1,26 +1,13 @@
-[2026-05-05 22:18:26] === pilot multi-seed run starting ===
+[2026-05-06 19:46:47] === pilot multi-seed run starting ===
   archs:           salience metric_c1
   seeds:           [0, 5)  (n=5)
   episodes:        250 (warmup 50)
   GPU mode:        shared GPU 0
   N_GPU seen:      1
   output:          outputs/multiseed_pilot
-[2026-05-05 22:18:26] launched arch=salience pid=2359  GPU=0
-[2026-05-05 22:18:28] launched arch=metric_c1 pid=2435  GPU=0
-[2026-05-05 22:19:03] === pilot multi-seed run starting ===
-  archs:           salience metric_c1
-  seeds:           [0, 5)  (n=5)
-  episodes:        250 (warmup 50)
-  GPU mode:        shared GPU 0
-  N_GPU seen:      1
-  output:          outputs/multiseed_pilot
-[2026-05-05 22:19:03] launched arch=salience pid=2533  GPU=0
-[2026-05-05 22:19:05] launched arch=metric_c1 pid=2609  GPU=0
+[2026-05-06 19:46:47] launched arch=salience pid=7679  GPU=0
+[2026-05-06 19:46:49] launched arch=metric_c1 pid=7759  GPU=0
 
-[2026-05-06 00:51:03] === pilot run completed ===
-Aggregate with:
-  python -m cear_pilot.experiments.aggregate_multiseed --root outputs/multiseed_pilot
-
-[2026-05-06 00:51:42] === pilot run completed ===
+[2026-05-06 21:58:34] === pilot run completed ===
 Aggregate with:
   python -m cear_pilot.experiments.aggregate_multiseed --root outputs/multiseed_pilot

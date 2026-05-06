@@ -264,6 +264,14 @@ def train(args):
     t0 = time.time()
     global_step = 0
 
+    # Per-print-block accumulators for action distribution + spatial diagnostics.
+    # Reset every args.print_every episodes so we see fresh dynamics.
+    block_actions: List[int] = []
+    block_xs: List[int] = []
+    block_ys: List[int] = []
+    block_advs: List[float] = []
+    block_costs: List[float] = []
+
     for global_ep, (n_perturb_now, block_id) in enumerate(ep_schedule):
         env.cfg.n_perturbations = n_perturb_now
 
@@ -350,7 +358,15 @@ def train(args):
             xhat_executed = xhat_all[0, a_int].unsqueeze(0)       # (1, obs_dim)
             cost_t = F.mse_loss(xhat_executed, x_next).detach().item()
             baseline_stats.update(cost_t)
-            advantage = cost_t - baseline_stats.mean
+            # Sign convention (matches phase 1 train_phase1.py:344):
+            #   advantage = baseline - cost
+            # → low cost (good action) yields *positive* advantage
+            # → loss = -(advantage · log π); minimizing loss = increasing log π
+            #   for low-cost actions = strengthening preference for them.
+            # The opposite sign (cost - baseline) trains the agent to AVOID
+            # low-cost actions, which is the wrong direction for predictability
+            # seeking.
+            advantage = baseline_stats.mean - cost_t
             adv_stats.update(advantage)
             adv_norm = float(np.clip(
                 advantage / max(adv_stats.std, 1e-6),
@@ -391,6 +407,13 @@ def train(args):
             pe_prev = obs_pe_val
             ep_obs_pe.append(obs_pe_val)
             ep_body_pe.append(body_pe_val)
+
+            # Per-print-block diagnostics
+            block_actions.append(a_int)
+            block_xs.append(int(info["x"]))
+            block_ys.append(int(info["y"]))
+            block_advs.append(adv_norm)
+            block_costs.append(cost_t)
 
             # advance g_prev for next-step smoothness
             g_prev = out["g"].detach().clone()
@@ -454,12 +477,35 @@ def train(args):
         if (global_ep + 1) % args.print_every == 0:
             elapsed = time.time() - t0
             phase_str = "warmup" if (global_ep < warmup_episodes) else "actor "
-            print(f"[ep {global_ep+1:4d}/{len(ep_schedule)}] [{phase_str}] "
-                  f"obs_PE={np.mean(ep_obs_pe):.4f} "
-                  f"body_PE={np.mean(ep_body_pe):.4f} "
-                  f"||g||={out['g'].detach().cpu().norm().item():.3f} "
-                  f"α={out['alpha'].item():.3f} nP={n_perturb_now} blk={block_id} "
-                  f"({elapsed:.0f}s)")
+            # Action distribution as compact "U/D/L/R/S" fractions
+            acts = np.array(block_actions)
+            n_a = max(len(acts), 1)
+            fU = float((acts == 0).sum() / n_a)
+            fD = float((acts == 1).sum() / n_a)
+            fL = float((acts == 2).sum() / n_a)
+            fR = float((acts == 3).sum() / n_a)
+            fS = float((acts == 4).sum() / n_a)
+            mean_x = float(np.mean(block_xs)) if block_xs else float("nan")
+            mean_y = float(np.mean(block_ys)) if block_ys else float("nan")
+            mean_adv = float(np.mean(block_advs)) if block_advs else 0.0
+            mean_cost = float(np.mean(block_costs)) if block_costs else 0.0
+            print(
+                f"[ep {global_ep+1:4d}/{len(ep_schedule)}] [{phase_str}] "
+                f"obs_PE={np.mean(ep_obs_pe):.4f} "
+                f"body_PE={np.mean(ep_body_pe):.4f} "
+                f"||g||={out['g'].detach().cpu().norm().item():.3f} "
+                f"α={out['alpha'].item():.3f} | "
+                f"mean_xy=({mean_x:.1f},{mean_y:.1f}) "
+                f"UDLRS={fU:.2f}/{fD:.2f}/{fL:.2f}/{fR:.2f}/{fS:.2f} "
+                f"adv={mean_adv:+.3f} c̄={mean_cost:.4f} "
+                f"({elapsed:.0f}s)"
+            )
+            # Reset block accumulators for next print window
+            block_actions.clear()
+            block_xs.clear()
+            block_ys.clear()
+            block_advs.clear()
+            block_costs.clear()
 
     # Save
     if args.save_traj and traj_rows:

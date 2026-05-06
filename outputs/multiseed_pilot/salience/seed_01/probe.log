@@ -7,20 +7,20 @@
 === Q1: Same x / different g → different gating? ===
   mode: salience
   target: z
-  var_target_across_g: 0.018573
+  var_target_across_g: 0.022996
   var_zraw_across_g_sanity: 0.000000
-  var_target_across_probes: 0.125823
-  var_zraw_across_probes: 0.329000
-  g_to_probe_ratio: 0.147611
-  var_salience_across_g: 0.023962
-  mean_salience: 0.591838
-  std_salience: 0.165142
+  var_target_across_probes: 0.029566
+  var_zraw_across_probes: 0.072962
+  g_to_probe_ratio: 0.777790
+  var_salience_across_g: 0.026406
+  mean_salience: 0.596971
+  std_salience: 0.167920
 
 === Q2 (a): Per-pair delta consistency across probes ===
-  mean_pairwise_consistency: +0.5774
-  std_pairwise_consistency: +0.1369
-  min_pairwise_consistency: +0.3574
-  max_pairwise_consistency: +0.9498
+  mean_pairwise_consistency: +0.8992
+  std_pairwise_consistency: +0.0189
+  min_pairwise_consistency: +0.8192
+  max_pairwise_consistency: +0.9799
 
 === Q2 (b): Linear transform R^2 between g pairs ===
   mean_linear_R2: 1.0000
@@ -29,16 +29,16 @@
   max_linear_R2: 1.0000
 
 === Q2 (c): Cluster structure of g-descriptors ===
-  silhouette_body: +0.1843
-  silhouette_perturb: +0.0602
-  silhouette_valence_zone: +0.2779
+  silhouette_body: +0.2452
+  silhouette_perturb: -0.0493
+  silhouette_valence_zone: +0.5553
 
 === Q2 (d): Probe-dependence of g spread ===
-  spread_mean: 0.2972
-  spread_std: 0.0327
-  spread_cov: 0.1100
-  spread_min: 0.2223
-  spread_max: 0.3337
+  spread_mean: 0.3679
+  spread_std: 0.0364
+  spread_cov: 0.0990
+  spread_min: 0.3084
+  spread_max: 0.4152
 [save] outputs/multiseed_pilot/salience/seed_01/probe/probe_results.parquet  (540 rows)
 
 [done]

@@ -66,14 +66,35 @@ def extract_train_metrics(traj_path: Path) -> Dict[str, float]:
     out["body_middle_late"]   = float(((end["body_state"] > 0.1) &
                                        (end["body_state"] < 0.9)).mean())
 
-    # Visit pattern: top vs bot zone, early vs late training
+    # Visit pattern: vertical (top/mid/bot via valence_zone_id) and
+    # horizontal (left/mid/right via zone_id, the noise-gradient axis).
+    # AAAI's classic Z2 preference emerges along the noise gradient.
     early = df[df["episode"] < 50]
     end_eps = df[df["episode"] >= df["episode"].max() - 50]
     for label, sub in (("early", early), ("late", end_eps)):
+        # vertical (valence)
         for vz_id, vz_name in ((0, "top"), (1, "mid"), (2, "bot")):
             out[f"visit_{vz_name}_{label}"] = float(
                 (sub["valence_zone_id"] == vz_id).mean()
             )
+        # horizontal (predictability gradient)
+        # zone_id 0 = left (high noise), 2 = right (low noise)
+        for cz_id, cz_name in ((0, "left"), (1, "midcol"), (2, "right")):
+            out[f"visit_{cz_name}_{label}"] = float(
+                (sub["zone_id"] == cz_id).mean()
+            )
+    # Late-training mean x position — directly captures right-side bias
+    out["mean_x_late"] = float(end_eps["x"].mean())
+    out["std_x_late"] = float(end_eps["x"].std())
+    out["mean_y_late"] = float(end_eps["y"].mean())
+    out["std_y_late"] = float(end_eps["y"].std())
+    # Spatial preference shift: right - left fraction (late)
+    out["right_minus_left_late"] = (
+        out["visit_right_late"] - out["visit_left_late"]
+    )
+    out["top_minus_bot_late"] = (
+        out["visit_top_late"] - out["visit_bot_late"]
+    )
 
     # Body coupling
     df_v = df.copy()
@@ -354,8 +375,14 @@ PRIMARY_METRICS = [
     # body
     "body_sat_low_late", "body_middle_late",
     "corr_body_pred_next",
-    # visit
-    "visit_top_late", "visit_bot_late",
+    # visit pattern (vertical: valence)
+    "visit_top_late", "visit_mid_late", "visit_bot_late",
+    "top_minus_bot_late",
+    # visit pattern (horizontal: predictability)
+    "visit_left_late", "visit_midcol_late", "visit_right_late",
+    "right_minus_left_late",
+    # spatial summary
+    "mean_x_late", "mean_y_late",
     # probe Q1
     "q1_g_to_probe_ratio",
     # probe Q2
