@@ -37,6 +37,7 @@ WARMUP_EPISODES="${WARMUP_EPISODES:-20}"
 SIGMA_LEFT="${SIGMA_LEFT:-0.40}"
 SIGMA_RIGHT="${SIGMA_RIGHT:-0.05}"
 N_PERTURBATIONS="${N_PERTURBATIONS:-4}"
+PRINT_EVERY="${PRINT_EVERY:-10}"
 OUTROOT="${OUTROOT:-outputs/multiseed_2stage}"
 
 case "$PROTOCOL_ARG" in
@@ -142,7 +143,7 @@ run_arch() {
             _emit "  [run]  training..."
             local START_T
             START_T=$(date +%s)
-            if ! python -m cear_pilot.training.train_phase3_2stage \
+            if ! stdbuf -oL -eL python -u -m cear_pilot.training.train_phase3_2stage \
                     --stage1_episodes "$STAGE1_EPS" \
                     --stage2_episodes "$STAGE2_EPS" \
                     --warmup_episodes "$WARMUP_EPISODES" \
@@ -150,12 +151,13 @@ run_arch() {
                     --sigma_left "$SIGMA_LEFT" \
                     --sigma_right "$SIGMA_RIGHT" \
                     --n_perturbations "$N_PERTURBATIONS" \
+                    --print_every "$PRINT_EVERY" \
                     --save_traj \
                     --seed "$SEED" \
                     --device cuda \
                     --gating_mode "$ARCH" \
                     --outdir "$RUN_DIR" \
-                    > "$RUN_DIR/train.log" 2>&1
+                    2>&1 | sed -u "s,^,[$PROTOCOL/$ARCH/s$SEED] ," | tee "$RUN_DIR/train.log"
             then
                 _emit "  [FAIL] training crashed; see $RUN_DIR/train.log"
                 continue
@@ -170,12 +172,12 @@ run_arch() {
             _emit "  [run]  probe analysis..."
             local START_T
             START_T=$(date +%s)
-            if ! python -m cear_pilot.experiments.probe_phase3 \
+            if ! stdbuf -oL -eL python -u -m cear_pilot.experiments.probe_phase3 \
                     --ckpt "$CKPT" \
                     --traj "$TRAJ" \
                     --outdir "$PROBE_DIR" \
                     --device cuda \
-                    > "$RUN_DIR/probe.log" 2>&1
+                    2>&1 | sed -u "s,^,[$PROTOCOL/$ARCH/s$SEED probe] ," | tee "$RUN_DIR/probe.log"
             then
                 _emit "  [FAIL] probe crashed; see $RUN_DIR/probe.log"
                 continue

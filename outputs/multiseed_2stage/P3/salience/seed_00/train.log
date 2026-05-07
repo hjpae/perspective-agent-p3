@@ -1,33 +1,6 @@
-[build] Agent params: 28911
-[build] Decoder params: 6506
-[train] protocol=P3  stage1=80 eps (warmup 20, then actor on)  stage2=170 eps (n_perturb=0)  total=250 eps
-[stage 1] backbone training: ablate_g=True, alpha_fixed=0.1, all params trainable
-[ep   10/250] [S1-wrm] obs_PE=0.0629 body_PE=0.0117 ||g||=0.000 α=0.000 | mean_xy=(4.9,6.3) UDLRS=0.20/0.18/0.24/0.20/0.18 adv=+0.007 c̄=0.0729 (20s)
-[ep   20/250] [S1-wrm] obs_PE=0.0790 body_PE=0.0011 ||g||=0.000 α=0.000 | mean_xy=(4.1,6.3) UDLRS=0.20/0.18/0.25/0.20/0.17 adv=+0.002 c̄=0.0913 (41s)
-[ep   30/250] [S1-act] obs_PE=0.0243 body_PE=0.0002 ||g||=0.000 α=0.000 | mean_xy=(6.9,6.8) UDLRS=0.02/0.01/0.02/0.02/0.94 adv=+0.044 c̄=0.0308 (62s)
-[ep   40/250] [S1-act] obs_PE=0.0239 body_PE=0.0000 ||g||=0.000 α=0.000 | mean_xy=(7.1,6.9) UDLRS=0.00/0.00/0.00/0.00/1.00 adv=+0.009 c̄=0.0237 (83s)
-[ep   50/250] [S1-act] obs_PE=0.0219 body_PE=0.0004 ||g||=0.000 α=0.000 | mean_xy=(7.2,7.0) UDLRS=0.00/0.00/0.00/0.00/1.00 adv=+0.010 c̄=0.0232 (104s)
-[ep   60/250] [S1-act] obs_PE=0.0243 body_PE=0.0007 ||g||=0.000 α=0.000 | mean_xy=(7.8,7.1) UDLRS=0.00/0.00/0.00/0.00/0.99 adv=+0.013 c̄=0.0213 (125s)
-[ep   70/250] [S1-act] obs_PE=0.0638 body_PE=0.0010 ||g||=0.000 α=0.000 | mean_xy=(3.8,6.7) UDLRS=0.01/0.01/0.44/0.00/0.54 adv=-0.018 c̄=0.0462 (145s)
-[ep   80/250] [S1-act] obs_PE=0.0669 body_PE=0.0004 ||g||=0.000 α=0.000 | mean_xy=(0.1,6.7) UDLRS=0.01/0.00/0.98/0.00/0.00 adv=+0.006 c̄=0.0671 (166s)
-[stage 1→2] saved outputs/multiseed_2stage/P3/salience/seed_00/ckpt_stage1.pt
-[stage 2] perspective formation: backbone frozen, trainable=1649/35417 params, gating_mode=salience, n_perturb=0
-[ep   90/250] [S2-prs] obs_PE=0.1710 body_PE=0.0003 ||g||=3.451 α=0.030 | mean_xy=(0.1,6.6) UDLRS=0.00/0.00/0.99/0.00/0.00 adv=-0.060 c̄=0.1706 (189s)
-[ep  100/250] [S2-prs] obs_PE=0.1682 body_PE=0.0044 ||g||=3.461 α=0.030 | mean_xy=(0.1,6.4) UDLRS=0.00/0.00/0.99/0.01/0.00 adv=-0.012 c̄=0.1547 (208s)
-[ep  110/250] [S2-prs] obs_PE=0.1377 body_PE=0.0005 ||g||=3.452 α=0.030 | mean_xy=(0.1,6.5) UDLRS=0.00/0.00/0.99/0.01/0.00 adv=-0.029 c̄=0.1632 (226s)
-[ep  120/250] [S2-prs] obs_PE=0.1314 body_PE=0.0003 ||g||=3.451 α=0.030 | mean_xy=(0.1,6.8) UDLRS=0.00/0.00/0.99/0.00/0.00 adv=+0.001 c̄=0.1615 (244s)
-[ep  130/250] [S2-prs] obs_PE=0.1268 body_PE=0.0005 ||g||=3.438 α=0.030 | mean_xy=(0.1,6.9) UDLRS=0.00/0.00/0.99/0.01/0.00 adv=-0.008 c̄=0.1549 (263s)
-[ep  140/250] [S2-prs] obs_PE=0.1391 body_PE=0.0011 ||g||=3.456 α=0.030 | mean_xy=(0.1,6.3) UDLRS=0.01/0.00/0.99/0.01/0.00 adv=-0.007 c̄=0.1399 (281s)
-[ep  150/250] [S2-prs] obs_PE=0.1327 body_PE=0.0002 ||g||=3.450 α=0.030 | mean_xy=(0.1,6.6) UDLRS=0.00/0.00/0.99/0.01/0.00 adv=-0.006 c̄=0.1433 (299s)
-[ep  160/250] [S2-prs] obs_PE=0.1443 body_PE=0.0001 ||g||=3.445 α=0.030 | mean_xy=(0.1,6.7) UDLRS=0.00/0.00/0.99/0.00/0.00 adv=-0.005 c̄=0.1441 (317s)
-[ep  170/250] [S2-prs] obs_PE=0.1750 body_PE=0.0001 ||g||=3.441 α=0.030 | mean_xy=(0.1,6.7) UDLRS=0.00/0.00/0.99/0.00/0.00 adv=-0.045 c̄=0.1458 (336s)
-[ep  180/250] [S2-prs] obs_PE=0.1141 body_PE=0.0004 ||g||=3.458 α=0.030 | mean_xy=(0.1,6.3) UDLRS=0.01/0.00/0.99/0.00/0.00 adv=+0.016 c̄=0.1309 (354s)
-[ep  190/250] [S2-prs] obs_PE=0.1552 body_PE=0.0004 ||g||=3.451 α=0.030 | mean_xy=(0.1,6.6) UDLRS=0.00/0.00/0.99/0.01/0.00 adv=-0.042 c̄=0.1455 (372s)
-[ep  200/250] [S2-prs] obs_PE=0.1747 body_PE=0.0007 ||g||=3.451 α=0.030 | mean_xy=(0.1,6.3) UDLRS=0.01/0.00/0.99/0.00/0.00 adv=-0.034 c̄=0.1390 (390s)
-[ep  210/250] [S2-prs] obs_PE=0.1517 body_PE=0.0002 ||g||=3.448 α=0.030 | mean_xy=(0.1,6.3) UDLRS=0.00/0.00/0.99/0.00/0.00 adv=-0.003 c̄=0.1323 (408s)
-[ep  220/250] [S2-prs] obs_PE=0.1082 body_PE=0.0029 ||g||=3.443 α=0.030 | mean_xy=(0.1,6.1) UDLRS=0.01/0.00/0.98/0.00/0.00 adv=+0.013 c̄=0.1218 (427s)
-[ep  230/250] [S2-prs] obs_PE=0.1289 body_PE=0.0001 ||g||=3.443 α=0.030 | mean_xy=(0.1,6.5) UDLRS=0.00/0.00/0.99/0.01/0.00 adv=-0.021 c̄=0.1344 (445s)
-[ep  240/250] [S2-prs] obs_PE=0.1208 body_PE=0.0003 ||g||=3.432 α=0.030 | mean_xy=(0.1,6.5) UDLRS=0.00/0.00/0.99/0.00/0.00 adv=-0.008 c̄=0.1302 (463s)
-[ep  250/250] [S2-prs] obs_PE=0.1375 body_PE=0.0001 ||g||=3.434 α=0.030 | mean_xy=(0.1,6.7) UDLRS=0.00/0.00/0.99/0.00/0.00 adv=-0.014 c̄=0.1322 (482s)
-[save] outputs/multiseed_2stage/P3/salience/seed_00/traj.parquet (75000 rows)
-[save] outputs/multiseed_2stage/P3/salience/seed_00/ckpt_final.pt
+[P3/salience/s0] [build] Agent params: 28911
+[P3/salience/s0] [build] Decoder params: 6506
+[P3/salience/s0] [train] protocol=P3  stage1=80 eps (warmup 20, then actor on)  stage2=170 eps (n_perturb=0)  total=250 eps
+[P3/salience/s0] [stage 1] backbone training: ablate_g=True, alpha_fixed=0.1, all params trainable
+[P3/salience/s0] [ep   10/250] [S1-wrm] obs_PE=0.0759 body_PE=0.0177 ||g||=0.000 α=0.000 | mean_xy=(7.6,6.5) UDLRS=0.22/0.21/0.20/0.21/0.17 adv=+0.008 c̄=0.0747 (29s)
+[P3/salience/s0] [ep   20/250] [S1-wrm] obs_PE=0.0978 body_PE=0.0005 ||g||=0.000 α=0.000 | mean_xy=(5.2,4.7) UDLRS=0.23/0.20/0.22/0.18/0.17 adv=+0.026 c̄=0.0840 (57s)

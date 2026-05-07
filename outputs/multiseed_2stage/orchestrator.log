@@ -1,4 +1,4 @@
-[2026-05-07 16:36:46] === two-stage pilot run starting ===
+[2026-05-07 20:07:23] === two-stage pilot run starting ===
   protocols:       P3 P4
   archs:           salience metric_c1
   seeds:           [0, 5)  (n=5)
@@ -8,39 +8,6 @@
   n_perturb (P4):  4
   GPU mode:        shared GPU 0
   output:          outputs/multiseed_2stage
-[2026-05-07 16:36:46] === starting protocol P3 ===
-[2026-05-07 16:36:46] launched protocol=P3 arch=salience pid=2449  GPU=0
-[2026-05-07 16:36:48] launched protocol=P3 arch=metric_c1 pid=2595  GPU=0
-[2026-05-07 16:37:18] === two-stage pilot run starting ===
-  protocols:       P3 P4
-  archs:           salience metric_c1
-  seeds:           [0, 5)  (n=5)
-  stage1_eps:      80  (warmup 20)
-  stage2_eps:      170
-  sigma:           0.40 → 0.05
-  n_perturb (P4):  4
-  GPU mode:        shared GPU 0
-  output:          outputs/multiseed_2stage
-[2026-05-07 16:37:18] === starting protocol P3 ===
-[2026-05-07 16:37:18] launched protocol=P3 arch=salience pid=2762  GPU=0
-[2026-05-07 16:37:20] launched protocol=P3 arch=metric_c1 pid=2905  GPU=0
-[2026-05-07 17:38:30] === protocol P3 done ===
-[2026-05-07 17:38:30] === starting protocol P4 ===
-[2026-05-07 17:38:30] launched protocol=P4 arch=salience pid=8745  GPU=0
-[2026-05-07 17:38:31] === protocol P3 done ===
-[2026-05-07 17:38:31] === starting protocol P4 ===
-[2026-05-07 17:38:31] launched protocol=P4 arch=salience pid=8893  GPU=0
-[2026-05-07 17:38:32] launched protocol=P4 arch=metric_c1 pid=9036  GPU=0
-[2026-05-07 17:38:33] launched protocol=P4 arch=metric_c1 pid=9180  GPU=0
-[2026-05-07 18:40:51] === protocol P4 done ===
-
-[2026-05-07 18:40:51] === all protocols completed ===
-Aggregate per protocol with:
-  python -m cear_pilot.experiments.aggregate_multiseed --root outputs/multiseed_2stage/P3
-  python -m cear_pilot.experiments.aggregate_multiseed --root outputs/multiseed_2stage/P4
-[2026-05-07 18:40:51] === protocol P4 done ===
-
-[2026-05-07 18:40:51] === all protocols completed ===
-Aggregate per protocol with:
-  python -m cear_pilot.experiments.aggregate_multiseed --root outputs/multiseed_2stage/P3
-  python -m cear_pilot.experiments.aggregate_multiseed --root outputs/multiseed_2stage/P4
+[2026-05-07 20:07:23] === starting protocol P3 ===
+[2026-05-07 20:07:23] launched protocol=P3 arch=salience pid=16667  GPU=0
+[2026-05-07 20:07:25] launched protocol=P3 arch=metric_c1 pid=16810  GPU=0

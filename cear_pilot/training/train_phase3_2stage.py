@@ -101,6 +101,28 @@ ERR_DIM = 6
 BODY_DIM = 1
 
 
+def seed_everything(seed: int, deterministic: bool = True) -> None:
+    """Set all RNG seeds for full reproducibility (matches phase 1 spec).
+
+    Without this, network init / action sampling / dropout etc. all use
+    PyTorch's global random state, so the same `--seed` argument can yield
+    different stage 1 attractors across runs. This is essential for any
+    seed-paired analysis (P3 vs P4 with same nominal seed must share stage 1).
+    """
+    import os
+    import random
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        try:
+            torch.use_deterministic_algorithms(True)
+        except Exception:
+            pass
+
+
 def build_err_t(pred_err, pred_err_ema_short, pred_err_ema_long,
                 pred_err_prev, perturbation_active, perturbation_trace, device):
     """Same env-PE feature vector as phase 2."""
@@ -196,6 +218,11 @@ def build_agent_and_decoder(args):
 
 def train(args):
     device = args.device
+
+    # Seed all RNGs BEFORE any module is constructed. Network initialization
+    # is sensitive to global random state, so this must come first.
+    seed_everything(int(args.seed), deterministic=True)
+
     agent, decoder = build_agent_and_decoder(args)
     agent.to(device)
     decoder.to(device)
@@ -692,8 +719,8 @@ def parse_args():
     ap.add_argument("--alpha_max", type=float, default=0.30)
 
     # Phase 3 env: perception
-    ap.add_argument("--sigma_left", type=float, default=0.20)
-    ap.add_argument("--sigma_right", type=float, default=0.10)
+    ap.add_argument("--sigma_left", type=float, default=0.40)
+    ap.add_argument("--sigma_right", type=float, default=0.05)
     ap.add_argument("--n_perturbations", type=int, default=4)
     ap.add_argument("--perturbation_duration", type=int, default=15)
     ap.add_argument("--perturbation_scale", type=float, default=0.12)
