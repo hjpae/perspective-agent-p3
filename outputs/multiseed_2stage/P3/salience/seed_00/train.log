@@ -1,6 +1,0 @@
-[P3/salience/s0] [build] Agent params: 28911
-[P3/salience/s0] [build] Decoder params: 6506
-[P3/salience/s0] [train] protocol=P3  stage1=80 eps (warmup 20, then actor on)  stage2=170 eps (n_perturb=0)  total=250 eps
-[P3/salience/s0] [stage 1] backbone training: ablate_g=True, alpha_fixed=0.1, all params trainable
-[P3/salience/s0] [ep   10/250] [S1-wrm] obs_PE=0.0759 body_PE=0.0177 ||g||=0.000 α=0.000 | mean_xy=(7.6,6.5) UDLRS=0.22/0.21/0.20/0.21/0.17 adv=+0.008 c̄=0.0747 (29s)
-[P3/salience/s0] [ep   20/250] [S1-wrm] obs_PE=0.0978 body_PE=0.0005 ||g||=0.000 α=0.000 | mean_xy=(5.2,4.7) UDLRS=0.23/0.20/0.22/0.18/0.17 adv=+0.026 c̄=0.0840 (57s)

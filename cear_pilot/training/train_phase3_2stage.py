@@ -18,15 +18,15 @@ Stage 1 — Backbone training (default 80 episodes):
   - Perturbation is OFF in stage 1 for both P3 and P4 protocols.
 
 Stage 2 — Perspective formation (default 170 episodes):
-  - Backbone (encoder base, decoder, state head, policy, GRU update path)
-    *frozen* (requires_grad=False). Only the gating layer (salience or
-    metric_c1) and AlphaNet are trainable.
+  - Policy frozen (requires_grad=False). Everything else (encoder + gating,
+    decoder, state head main + body head, AlphaNet) trainable.
+  - The frozen policy carries the predictability-seeking behavioral tendency
+    learned in stage 1. The rest of the world model adapts to the newly
+    re-enabled affordance + body homeostasis.
   - Forward pass with ablate_g=False — g flows freely, gating layer
     modulates encoder output, AlphaNet computes adaptive plasticity.
-  - Actor objective is *disabled* (w_actor=0). The trained policy from
-    stage 1 carries behavior; perspective layer learns from the
-    prediction error its presence creates.
-  - Loss = obs PE + body PE + smoothness on g (no actor, no entropy).
+  - Actor objective is *disabled* (w_actor=0). Loss = obs PE + body PE
+    + smoothness on g.
   - Perturbation handling depends on protocol:
       * P3: perturbation OFF throughout stage 2 (assay-only protocol)
       * P4: perturbation ON in stage 2 (perturbation as training signal)
@@ -243,6 +243,17 @@ def train(args):
     )
     env = NZonePhase3Env(config=env_cfg)
 
+    # Save original env config values for stage 2 restoration. We need these
+    # because env.cfg may share the same instance as env_cfg, so mutating
+    # env.cfg in stage 1 also mutates env_cfg — losing the originals.
+    orig_env_cfg = {
+        "affordance_top": float(env_cfg.affordance_top),
+        "affordance_bottom": float(env_cfg.affordance_bottom),
+        "metabolic_cost": float(env_cfg.metabolic_cost),
+        "movement_cost": float(env_cfg.movement_cost),
+        "affordance_to_body_gain": float(env_cfg.affordance_to_body_gain),
+    }
+
     all_params = list(agent.parameters()) + list(decoder.parameters())
     optimizer = torch.optim.Adam(all_params, lr=args.lr)
 
@@ -296,6 +307,15 @@ def train(args):
     baseline_stats = EMAMeanVar(beta=args.actor_baseline_beta)
     adv_stats = EMAMeanVar(beta=args.actor_std_beta)
 
+    # Adaptive entropy weight (AAAI/phase 1 spec).
+    # Target is 60% of max possible entropy (log of action count).
+    # Weight starts at init and is bounded by [min, max].
+    entropy_weight = float(args.w_entropy_init)
+    entropy_target = float(np.log(n_actions) * args.entropy_target_ratio)
+    print(f"[train] adaptive entropy: init={entropy_weight:.4f} "
+          f"target={entropy_target:.4f} (={args.entropy_target_ratio:.0%} of max) "
+          f"bounds=[{args.w_entropy_min}, {args.w_entropy_max}]")
+
     warmup_episodes = int(max(0, args.warmup_episodes))
     if warmup_episodes >= stage1_eps:
         print(f"[warn] warmup_episodes ({warmup_episodes}) >= stage1_episodes "
@@ -337,44 +357,53 @@ def train(args):
                 # to "fixed" for clarity / trajectory logging.
                 agent.world.cfg.update_mode = "fixed"
                 agent.world.cfg.alpha_fixed = float(args.stage1_alpha_fixed)
+                # Disable valenced affordance + body homeostasis. The
+                # commitment is that stage 1 actor learns from the sigma
+                # gradient ONLY: predictability seeking, no body / valence
+                # confound. Body remains static at body_init (0.5).
+                env.cfg.affordance_top = 0.0
+                env.cfg.affordance_bottom = 0.0
+                env.cfg.metabolic_cost = 0.0
+                env.cfg.movement_cost = 0.0
+                env.cfg.affordance_to_body_gain = 0.0
+                # Rebuild the affordance map with the disabled values so
+                # the env's per-cell affordance channel reads as zero.
+                env._affordance_map = env._build_affordance_map()
                 # All params trainable; build optimizer fresh
                 for p in all_params:
                     p.requires_grad_(True)
                 optimizer = torch.optim.Adam(all_params, lr=args.lr)
                 print(f"[stage 1] backbone training: ablate_g=True, "
                       f"alpha_fixed={args.stage1_alpha_fixed}, "
+                      f"affordance OFF, body homeostasis OFF, "
                       f"all params trainable")
             elif cur_stage == 2:
-                # Entering stage 2: freeze backbone, only gating layer + AlphaNet
-                # trainable. World update_mode → adaptive.
+                # Entering stage 2: freeze the POLICY only. Everything else
+                # (encoder + gating, decoder, state head incl. body head,
+                # AlphaNet) remains trainable.
+                #
+                # Commitment: the agent retains the predictability-seeking
+                # *behavioral tendency* learned in stage 1 (frozen policy),
+                # while the rest of the world model adapts to the newly
+                # re-enabled affordance + body homeostasis.
                 agent.world.cfg.update_mode = "adaptive"
-                # Freeze everything
+                env.cfg.affordance_top = orig_env_cfg["affordance_top"]
+                env.cfg.affordance_bottom = orig_env_cfg["affordance_bottom"]
+                env.cfg.metabolic_cost = orig_env_cfg["metabolic_cost"]
+                env.cfg.movement_cost = orig_env_cfg["movement_cost"]
+                env.cfg.affordance_to_body_gain = \
+                    orig_env_cfg["affordance_to_body_gain"]
+                env._affordance_map = env._build_affordance_map()
+                # Start with everything trainable
                 for p in all_params:
+                    p.requires_grad_(True)
+                # Then freeze policy only
+                for p in agent.policy.parameters():
                     p.requires_grad_(False)
-                # Unfreeze gating layer (per architecture)
-                trainable_modules: List[nn.Module] = []
-                gating_mode = agent.cfg.encoder.gating_mode.lower()
-                if gating_mode in ("salience", "both"):
-                    if hasattr(agent.enc.obs_enc, "salience"):
-                        trainable_modules.append(agent.enc.obs_enc.salience)
-                if gating_mode in ("metric_c1",):
-                    if hasattr(agent.enc.obs_enc, "metric_mlp"):
-                        trainable_modules.append(agent.enc.obs_enc.metric_mlp)
-                if gating_mode in ("film", "both"):
-                    if hasattr(agent.enc.obs_enc, "film"):
-                        trainable_modules.append(agent.enc.obs_enc.film)
-                # AlphaNet always trainable in stage 2
-                trainable_modules.append(agent.world.alpha_net)
-                # Set requires_grad on gating + alpha modules
-                trainable_params: List[torch.nn.Parameter] = []
-                for m in trainable_modules:
-                    for p in m.parameters():
-                        p.requires_grad_(True)
-                        trainable_params.append(p)
+                trainable_params = [p for p in all_params if p.requires_grad]
                 if not trainable_params:
                     raise RuntimeError(
-                        f"No trainable params in stage 2 for gating_mode="
-                        f"{gating_mode}. Check encoder structure."
+                        "No trainable params in stage 2 — check policy/agent setup."
                     )
                 optimizer = torch.optim.Adam(trainable_params, lr=args.lr)
                 # Save intermediate stage-1 ckpt
@@ -391,7 +420,9 @@ def train(args):
                     print(f"[stage 1→2] saved {stage1_ckpt_path}")
                 n_trainable = sum(p.numel() for p in trainable_params)
                 n_total = sum(p.numel() for p in all_params)
-                print(f"[stage 2] perspective formation: backbone frozen, "
+                gating_mode = agent.cfg.encoder.gating_mode.lower()
+                print(f"[stage 2] perspective formation: policy frozen, "
+                      f"affordance ON, body homeostasis ON, "
                       f"trainable={n_trainable}/{n_total} params, "
                       f"gating_mode={gating_mode}, n_perturb={n_perturb_now}")
             prev_stage = cur_stage
@@ -504,21 +535,21 @@ def train(args):
             log_pi_act = F.log_softmax(logits_act, dim=-1)[0, a_int]
             actor_loss = -(adv_norm * log_pi_act)
 
-            # ─── Entropy regularizer ───
+            # ─── Entropy regularizer with adaptive weight ───
+            # Phase 1's adaptive coefficient: if entropy < target → push
+            # weight up; if entropy >= target → let weight drift down.
+            # `entropy_weight` is the live, updated coefficient.
             ent = -(F.softmax(logits_act, dim=-1)
                     * F.log_softmax(logits_act, dim=-1)).sum(dim=-1)
             ent_loss = -ent.mean()  # negate so reducing this *increases* entropy
 
             # ─── Total loss with stage-aware weighting ───
             # Stage 1 warmup:    obs + body + smooth                (actor off)
-            # Stage 1 post-warm: obs + body + smooth + actor + ent  (actor on)
+            # Stage 1 post-warm: obs + body + smooth + actor + ent  (actor on, adaptive)
             # Stage 2:           obs + body + smooth                (actor off)
-            #   In stage 2, actor + entropy are off because policy is frozen
-            #   anyway; including them would add noise to the gradient stream
-            #   without changing trainable params.
             if actor_active:
                 w_actor_now = float(args.w_actor)
-                w_ent_now = float(args.w_entropy)
+                w_ent_now = float(entropy_weight)
             else:
                 w_actor_now = 0.0
                 w_ent_now = 0.0
@@ -536,6 +567,19 @@ def train(args):
             if args.clip_grad > 0:
                 nn.utils.clip_grad_norm_(all_params, args.clip_grad)
             optimizer.step()
+
+            # ─── Adaptive entropy weight update (AAAI/phase 1 line 371-377) ───
+            # Only adjust during actor-active phase. Outside (warmup, stage 2),
+            # weight is irrelevant because w_ent_now=0.
+            if actor_active:
+                ent_val = float(ent.detach().item())
+                if ent_val < entropy_target:
+                    entropy_weight *= (1.0 + float(args.entropy_adapt_rate)) # +2%
+                else:
+                    entropy_weight *= (1.0 - 0.5 * float(args.entropy_adapt_rate)) # -1%
+                entropy_weight = float(np.clip(
+                    entropy_weight, args.w_entropy_min, args.w_entropy_max
+                ))
 
             obs_pe_val = float(obs_loss.item())
             body_pe_val = float(body_loss.item())
@@ -629,14 +673,41 @@ def train(args):
             mean_y = float(np.mean(block_ys)) if block_ys else float("nan")
             mean_adv = float(np.mean(block_advs)) if block_advs else 0.0
             mean_cost = float(np.mean(block_costs)) if block_costs else 0.0
+
+            # 3×3 zone occupancy in this print block:
+            #   x ∈ [0,4]=L, [5,9]=M, [10,14]=R   (predictability axis)
+            #   y ∈ [0,4]=T, [5,9]=M, [10,14]=B   (valence axis: T=positive)
+            # Cell labels: TL TM TR / ML MM MR / BL BM BR
+            zone_counts = {
+                "TL": 0, "TM": 0, "TR": 0,
+                "ML": 0, "MM": 0, "MR": 0,
+                "BL": 0, "BM": 0, "BR": 0,
+            }
+            for x, y in zip(block_xs, block_ys):
+                xz = "L" if x <= 4 else ("M" if x <= 9 else "R")
+                yz = "T" if y <= 4 else ("M" if y <= 9 else "B")
+                zone_counts[yz + xz] += 1
+            n_zones = max(sum(zone_counts.values()), 1)
+            # Top-2 dominant zones
+            sorted_zones = sorted(
+                zone_counts.items(), key=lambda kv: kv[1], reverse=True
+            )
+            zone_str = " ".join(
+                f"{name}={cnt / n_zones:.2f}"
+                for name, cnt in sorted_zones[:2]
+                if cnt > 0
+            )
+            # Mean entropy of policy in this block (only meaningful when actor active)
+            ent_val_now = float(ent.detach().item())
             print(
                 f"[ep {global_ep+1:4d}/{len(ep_schedule)}] [{phase_str}] "
                 f"obs_PE={np.mean(ep_obs_pe):.4f} "
                 f"body_PE={np.mean(ep_body_pe):.4f} "
                 f"||g||={out['g'].detach().cpu().norm().item():.3f} "
                 f"α={out['alpha'].item():.3f} | "
-                f"mean_xy=({mean_x:.1f},{mean_y:.1f}) "
+                f"xy=({mean_x:.1f},{mean_y:.1f}) zones[{zone_str}] "
                 f"UDLRS={fU:.2f}/{fD:.2f}/{fL:.2f}/{fR:.2f}/{fS:.2f} "
+                f"H={ent_val_now:.3f} wH={entropy_weight:.4f} "
                 f"adv={mean_adv:+.3f} c̄={mean_cost:.4f} "
                 f"({elapsed:.0f}s)"
             )
@@ -707,7 +778,19 @@ def parse_args():
                          "Stage 2 has actor permanently OFF.")
     ap.add_argument("--w_actor", type=float, default=0.5)
     ap.add_argument("--w_smooth", type=float, default=0.25)
-    ap.add_argument("--w_entropy", type=float, default=0.01)
+    # Adaptive entropy weight (AAAI/phase 1 spec). Weight is adjusted each
+    # step based on whether current policy entropy is below or above target.
+    # If entropy < target: weight increases (push toward more exploration);
+    # if entropy >= target: weight decreases (let actor sharpen).
+    # Bounded by [min, max] to prevent runaway adjustment.
+    ap.add_argument("--w_entropy_init", type=float, default=0.01)
+    ap.add_argument("--w_entropy_min", type=float, default=0.002)
+    ap.add_argument("--w_entropy_max", type=float, default=0.05)
+    ap.add_argument("--entropy_target_ratio", type=float, default=0.60,
+                    help="Target entropy as fraction of log(n_actions). "
+                         "0.60 = stay reasonably exploratory.")
+    ap.add_argument("--entropy_adapt_rate", type=float, default=0.02,
+                    help="Per-step multiplicative adjustment of entropy weight.")
     ap.add_argument("--actor_baseline_beta", type=float, default=0.98)
     ap.add_argument("--actor_std_beta", type=float, default=0.99)
     ap.add_argument("--adv_clip", type=float, default=3.0)
