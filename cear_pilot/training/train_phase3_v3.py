@@ -185,6 +185,7 @@ def build_agent_and_decoder(args):
         use_error_feedback=True,
         err_dim=ERR_DIM,
         body_err_dim=BODY_DIM,
+        body_err_in_alpha=bool(args.body_err_in_alpha),
         body_in_g=bool(args.body_in_g),
         body_g_scale=float(args.body_g_scale),
     )
@@ -231,7 +232,11 @@ def build_agent_and_decoder(args):
     print(f"[build] body-coupled: encoder={enc_cfg.body_dim>0} "
           f"policy={policy_cfg.body_dim>0} state={state_cfg.body_dim>0}")
     print(f"[build] body_in_g={world_cfg.body_in_g} "
-          f"(scale={world_cfg.body_g_scale})  obs_dim={enc_cfg.obs_dim}")
+          f"(scale={world_cfg.body_g_scale})  "
+          f"body_err_in_alpha={world_cfg.body_err_in_alpha}  "
+          f"obs_dim={enc_cfg.obs_dim}")
+    print(f"[build] g_carry_decay={args.g_carry_decay}  "
+          f"(1.0=full carry, 0.0=full reset)")
     sil_str = (f"silhouette_dim={enc_cfg.silhouette_dim} "
                f"(σ={args.silhouette_sigma})"
                if enc_cfg.silhouette_dim > 0 else "silhouette=disabled")
@@ -338,8 +343,20 @@ def train(args):
         ep_body_pe: List[float] = []
         done = False
 
-        # Reset agent latents and body_pred between episodes
-        agent.reset(batch_size=1)
+        # Episode-boundary state handling:
+        # - g (perspective): CARRIED across episodes with decay factor
+        #   `g_carry_decay` (default 0.9). Subjectivity layer accumulates
+        #   over the entire training run, but with slight per-episode
+        #   refresh to avoid monotonic ||g|| growth and saturation-driven
+        #   instability. Episodes are not independent contexts but a
+        #   continuous experiential stream with mild reset.
+        # - body_pred: RESET to env body_init (0.5). The env resets the
+        #   actual body_state at episode start, so body_pred must align
+        #   with that — otherwise body_PE on step 1 spuriously fires from
+        #   the previous episode's final body_pred.
+        # - alpha: stateless; recomputed each step. No reset needed.
+        agent.decay_g(args.g_carry_decay)
+        agent.reset_body_pred()
         g_prev = agent.get_latents()["g"].detach().clone()
 
         while not done:
@@ -422,34 +439,38 @@ def train(args):
             # ─── Smoothness loss on g (slow latent regularizer) ───
             smooth_loss = F.mse_loss(out["g"], g_prev.detach())
 
-            # ─── Actor loss (REINFORCE with action-conditioned PE as cost) ───
-            # Cost combines obs PE (visual predictability) and body PE
-            # (homeostatic stability) — both grounded prediction errors.
-            #   c_t = MSE(decoder(g_t, a_t), obs_{t+1}) + λ · body_PE
-            # This instantiates Layer 1 (instinct): the agent's
-            # predictability-seeking is grounded both in visual stability
-            # ─── Actor cost = obs prediction error + body prediction error ───
-            # Layer 1 cost combines two grounded prediction errors:
-            #   obs_cost  = MSE(decoder(g, a), x_next)  — visual predictability
-            #   body_pe²  = (body_pred - body_actual)²  — interoceptive surprisal
-            # cost_t = obs_cost + λ_body · body_pe²
+            # ─── Actor cost = obs PE² + λ · (1 - body_actual_next) ───
+            # Layer 1 cost combines two grounded signals with distinct roles:
+            #   obs_cost  = MSE(decoder(g, a), x_next)   — visual predictability
+            #   body_drive = 1 - body_actual_next         — survival drive
+            # cost_t = obs_cost + λ_body · body_drive
             #
-            # Both terms are squared prediction errors. The agent's actor
-            # learns to minimize cost — i.e., select actions that produce
-            # both predictable visual outcomes and predictable body
-            # outcomes. Body PE squared (not body deviation from a target)
-            # keeps the cost interpretation as predictive: body is a
-            # learnable signal whose stability the agent seeks via action.
+            # Body PE (squared) is intentionally NOT in the actor cost.
+            # Architectural commitment: prediction error of body is
+            # already handled by:
+            #   - body PE → AlphaNet (plasticity rate driver)
+            #   - body PE → g GRU update content (commitment III:
+            #              interoceptive PE constitutive of perspective)
+            #   - body PE squared → body_loss (state head's body_head learns
+            #              to predict body)
+            # So actor cost carries the *drive* (survival imperative —
+            # body higher = lower cost), while perspective formation and
+            # body prediction handle the *predictive* aspects.
+            #
+            # Linear gradient (not deviation²) avoids saturation-driven
+            # local minima at body=0 (where squared-PE attractor would
+            # form once body_pred learns to track body=0). Body=0 now
+            # has *high* cost regardless of body_pred — bot zone is no
+            # longer a stable attractor.
             #
             # Sign convention (matches phase 1 train_phase1.py:344):
             #   advantage = baseline - cost
-            # → low cost (good action) yields *positive* advantage.
+            # → low cost (good action: high body) yields *positive* advantage.
             xhat_executed = xhat_all[0, a_int].unsqueeze(0)       # (1, obs_dim)
             obs_cost = F.mse_loss(xhat_executed, x_next).detach().item()
-            body_pe_squared = float(
-                ((body_pred_t - body_actual_next) ** 2).detach().item()
-            )
-            cost_t = float(obs_cost + args.lambda_body * body_pe_squared)
+            body_actual_next_val = float(body_actual_next.item())
+            body_drive = float(1.0 - body_actual_next_val)
+            cost_t = float(obs_cost + args.lambda_body * body_drive)
             baseline_stats.update(cost_t)
             advantage = baseline_stats.mean - cost_t
             adv_stats.update(advantage)
@@ -658,7 +679,7 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--episodes", type=int, default=200)
+    ap.add_argument("--episodes", type=int, default=250)
     ap.add_argument("--max_steps", type=int, default=300)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--clip_grad", type=float, default=1.0)
@@ -676,28 +697,63 @@ def parse_args():
                     help="Body-only z dim (output of BodyEncoder).")
 
     # ── Layer 1 cost design ────────────────────────────────────────
-    # Actor cost = obs_PE + λ_body · body_PE².
-    # Both components are squared prediction errors. lambda_body=0
-    # disables body PE in actor cost. lambda_body~3 makes body PE
-    # substantial alongside obs PE.
-    ap.add_argument("--lambda_body", type=float, default=3.0,
-                    help="Weight of body PE² in actor cost. "
-                         "cost_t = obs_PE + λ · (body_pred - body_actual)².")
+    # Actor cost = obs_PE² + λ_body · (1 - body_actual_next).
+    #
+    # Two distinct cost components with distinct roles:
+    #   obs_PE² : squared visual prediction error (epistemic uncertainty)
+    #   (1-b)   : body drive / survival imperative (interoceptive value)
+    #
+    # Body PE² (squared) is intentionally NOT in actor cost — it would
+    # create dual saturation attractors at body=0 and body=1 (both yield
+    # PE→0 once body_pred learns the saturated value), and the body=0
+    # bot-zone attractor is pathological under our commitment.
+    # Linear (1-body) drive: body=0 → cost=λ (high, repellor), body=1 →
+    # cost=0 (low, attractor). Bot ceases to be a stable attractor.
+    #
+    # Magnitudes:
+    #   obs_PE²: typically 0.005-0.1
+    #   (1-b)  : 0-1
+    # λ_body=0.05 makes the two contributions comparable on average.
+    ap.add_argument("--lambda_body", type=float, default=0.05,
+                    help="Weight of body drive in actor cost. "
+                         "cost_t = obs_PE² + λ · (1 - body_actual_next).")
 
-    # ── Phase 3 commitment (III): body PE → g GRU update content ──
-    # When True, body_err_t (signed scalar) is concatenated into the GRU
-    # input (scaled by body_g_scale) in addition to its existing AlphaNet
-    # role. Asymmetric: env PE → AlphaNet only; body PE → both AlphaNet
-    # and g GRU update content. Rationale: interoceptive grounding of
-    # subjectivity (body PE is constitutive of g, not just a plasticity
-    # rate driver).
+    # ── Phase 3 body PE routing (asymmetric channels) ──
+    # body_err_t (1-d signed) can route to TWO independent destinations:
+    #   --body_in_g           → g GRU input (perspective content)
+    #   --body_err_in_alpha   → AlphaNet input (plasticity rate)
+    # Default Phase 3:
+    #   body_in_g          = True   (interoceptive PE constitutive of g)
+    #   body_err_in_alpha  = False  (env PE governs plasticity rate alone)
+    # Decoupling avoids AlphaNet saturation cycles: a body PE spike
+    # would otherwise drive alpha to max, force rapid g reorganization,
+    # and chain into spontaneous reorganization patterns. Now body PE
+    # only modulates *what* the perspective is grounded on, not *how
+    # fast* it revises.
     ap.add_argument("--body_in_g", action="store_true", default=True,
                     help="Route body PE into the g GRU update content.")
     ap.add_argument("--no_body_in_g", action="store_false", dest="body_in_g",
                     help="Disable body PE → g GRU (ablation).")
+    ap.add_argument("--body_err_in_alpha", action="store_true", default=False,
+                    help="Route body PE into AlphaNet input (plasticity rate). "
+                         "Default off: env PE alone drives plasticity rate.")
+    ap.add_argument("--with_body_err_in_alpha", action="store_true",
+                    dest="body_err_in_alpha",
+                    help="(alias) Enable body PE → AlphaNet (legacy/ablation).")
     ap.add_argument("--body_g_scale", type=float, default=20.0,
                     help="Scale factor for body_err_t in GRU input "
                          "(body PE magnitude ~0.05; scale to ~1.0).")
+
+    # ── g carry-decay across episode boundaries ──
+    # 1.0 = full carry (cumulative; risks ||g|| saturation).
+    # 0.0 = full reset every episode (loses long-horizon perspective).
+    # 0.9 (default) = mostly carry with slight per-episode refresh —
+    # preserves perspective formation while preventing magnitude growth
+    # and the saturation-driven instabilities (spontaneous reorganization
+    # cycles) it produces.
+    ap.add_argument("--g_carry_decay", type=float, default=0.9,
+                    help="Multiplicative decay factor for g at episode "
+                         "boundaries. 1.0 = full carry, 0.0 = full reset.")
 
     # ── Body silhouette (interoceptive directional affordance) ──
     # silhouette_dim=0 disables (BodyEncoder receives only body_state).
@@ -713,7 +769,7 @@ def parse_args():
     # Warm-up: actor objective disabled for the first warmup_episodes,
     # during which only obs prediction + body prediction train the backbone.
     # Default 50 episodes matches AAAI's ratio (~25% of training).
-    ap.add_argument("--warmup_episodes", type=int, default=30)
+    ap.add_argument("--warmup_episodes", type=int, default=50)
     ap.add_argument("--w_actor", type=float, default=0.5)
     ap.add_argument("--w_smooth", type=float, default=0.25)
     # Adaptive entropy weight (AAAI/phase 1 spec)

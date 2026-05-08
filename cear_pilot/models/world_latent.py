@@ -42,16 +42,21 @@ class WorldLatentConfig:
     use_error_feedback: bool = True
     err_dim: int = 6  # env PE features + perturbation signal
 
-    # Phase 3: body PE as a separate AlphaNet channel.
-    # body_err_dim = 0 disables it (phase 1-2 compat).
+    # Phase 3: body PE channel(s).
+    # body_err_dim = 0 disables body PE entirely (phase 1-2 compat).
+    # When body_err_dim > 0, body_err_t (1-d signed scalar) is available
+    # for routing to AlphaNet and/or g GRU separately:
+    #   body_err_in_alpha → AlphaNet input (plasticity rate)
+    #   body_in_g         → g GRU input (perspective content; commitment III)
+    # The two paths are independently toggleable. Default Phase 3:
+    #   body_err_in_alpha = False (env PE drives plasticity rate only)
+    #   body_in_g         = True  (body PE constitutive of perspective content)
+    # Rationale: epistemic surprise (env PE) governs *how fast* perspective
+    # revises (plasticity rate). Interoceptive surprise (body PE) governs
+    # *what* the perspective is grounded on (content). Decoupling avoids
+    # AlphaNet saturation cycles driven by spontaneous body PE spikes.
     body_err_dim: int = 0
-
-    # Phase 3 commitment (III): body PE also enters the g GRU update path.
-    # Rationale: while env PE modulates only plasticity rate (AlphaNet),
-    # interoceptive body PE is part of the *content* of perspective
-    # (Safron's "interoceptive body as primordial substrate of subjectivity").
-    # Asymmetric: env PE → AlphaNet only; body PE → AlphaNet + g GRU input.
-    # When body_in_g=True, GRU input becomes [z_t, p_emb, body_err_t * body_g_scale].
+    body_err_in_alpha: bool = False
     body_in_g: bool = False
     body_g_scale: float = 20.0  # scale up body_err_t (~0.05 magnitude) to be
                                 # comparable to z_t/p_emb (~1.0 magnitude).
@@ -77,10 +82,11 @@ class WorldLatent(nn.Module):
         self.ln = nn.LayerNorm(cfg.g_dim) if cfg.layernorm else nn.Identity()
 
         # AlphaNet input: z_t + p_emb + g_prev [+ err_t] [+ body_err_t]
+        # body_err_t included only when body_err_in_alpha flag is True.
         alpha_in_dim = cfg.z_dim + cfg.p_dim + cfg.g_dim
         if cfg.use_error_feedback:
             alpha_in_dim += int(cfg.err_dim)
-        if int(cfg.body_err_dim) > 0:
+        if int(cfg.body_err_dim) > 0 and cfg.body_err_in_alpha:
             alpha_in_dim += int(cfg.body_err_dim)
 
         self.alpha_net = nn.Sequential(
@@ -128,8 +134,14 @@ class WorldLatent(nn.Module):
                 err_t = err_t.expand(g_prev.shape[0], -1)
             parts.append(err_t)
 
-        # Phase 3: body PE channel
-        if int(self.cfg.body_err_dim) > 0 and body_err_t is not None:
+        # Phase 3: body PE channel — included in AlphaNet only when
+        # body_err_in_alpha=True. When False, body PE bypasses AlphaNet
+        # and only enters g GRU update content (commitment III), so
+        # plasticity rate is governed solely by env PE (epistemic
+        # surprise).
+        if (int(self.cfg.body_err_dim) > 0
+                and self.cfg.body_err_in_alpha
+                and body_err_t is not None):
             body_err_t = body_err_t.to(device=g_prev.device, dtype=g_prev.dtype)
             if body_err_t.ndim == 1:
                 body_err_t = body_err_t.unsqueeze(0)

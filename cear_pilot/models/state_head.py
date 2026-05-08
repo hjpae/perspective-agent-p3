@@ -71,10 +71,16 @@ class StateHead(nn.Module):
         )
         self.ln = nn.LayerNorm(cfg.s_dim)
 
-        # Phase 3: body head shares the same input.
+        # Phase 3: body head receives the same shared input PLUS the
+        # current body_state, so that body prediction is grounded in
+        # *immediate interoceptive context* and not just in g (which is
+        # carried across episodes and could lead to body_pred lock-in to
+        # past body context after env reset). The s_t (policy state) head
+        # remains g-grounded as before — no change to s_t computation.
         if cfg.body_dim > 0:
+            body_in_dim = in_dim + cfg.body_dim   # +body_dim for current body
             self.body_head = nn.Sequential(
-                nn.Linear(in_dim, cfg.body_hidden),
+                nn.Linear(body_in_dim, cfg.body_hidden),
                 nn.Tanh(),
                 nn.Linear(cfg.body_hidden, cfg.body_dim),
             )
@@ -123,10 +129,13 @@ class StateHead(nn.Module):
         p_emb: torch.Tensor,
         g_t: torch.Tensor,
         M_g: Optional[torch.Tensor] = None,
+        body_t: Optional[torch.Tensor] = None,
     ):
         """
         If body_dim == 0: returns s_t.
-        If body_dim  > 0: returns (s_t, body_pred_t).
+        If body_dim  > 0: returns (s_t, body_pred_t). body_t (current
+            body state, B × body_dim) is required and is concatenated
+            into the body_head input only.
         M_g (B, z_dim, z_dim) required if cfg.use_metric is True.
         """
         x = self._build_input(z_t, p_emb, g_t, M_g=M_g)
@@ -134,6 +143,12 @@ class StateHead(nn.Module):
         s = self.ln(s)
 
         if self.cfg.body_dim > 0:
-            body_pred = torch.sigmoid(self.body_head(x))
+            if body_t is None:
+                raise ValueError(
+                    "StateHead.body_dim > 0 requires body_t to be provided "
+                    "(current body state for grounding body prediction)."
+                )
+            x_body = torch.cat([x, body_t], dim=-1)
+            body_pred = torch.sigmoid(self.body_head(x_body))
             return s, body_pred
         return s

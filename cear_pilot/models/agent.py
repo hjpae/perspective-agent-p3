@@ -104,6 +104,53 @@ class CEARAgent(nn.Module):
         else:
             self._body_pred_prev = None
 
+    def reset_body_pred(self) -> None:
+        """Reset only body_pred to env body_init (0.5). Leave g and alpha
+        unchanged — used at episode boundaries when g must carry across
+        episodes (long-horizon perspective formation) but body_state is
+        reset by env at episode start.
+
+        This separates two reset semantics:
+          - reset(): full latent reset (training start, assay start)
+          - reset_body_pred(): episode-boundary reset of body_pred only
+                               so that body_PE on step 1 of the new episode
+                               is computed against env's reset body_init,
+                               not against the carried-over final body_pred
+                               of the previous episode.
+        """
+        if self._g is None:
+            raise RuntimeError("reset_body_pred() called before reset(). "
+                               "Call reset() first to initialize batch_size.")
+        if self.has_body:
+            bs = self._g.shape[0]
+            self._body_pred_prev = torch.full(
+                (bs, self.cfg.state.body_dim),
+                0.5,
+                device=self.device_,
+                dtype=torch.float32,
+            )
+
+    def decay_g(self, factor: float) -> None:
+        """Multiplicatively decay the carried perspective g by `factor`.
+        Used at episode boundaries when g is carried across episodes:
+        full carry leads to monotonic ||g|| growth and eventual
+        saturation-driven instability. Partial decay (e.g. 0.9) preserves
+        most of the perspective representation while preventing
+        unbounded magnitude growth — phenomenologically, "previous
+        perspective is mostly preserved but with slight refresh upon
+        entering a new context".
+
+        factor in [0, 1]: 0 = full reset (equivalent to reset()'s g part),
+        1 = no decay (full carry).
+        """
+        if self._g is None:
+            raise RuntimeError("decay_g() called before reset(). "
+                               "Call reset() first to initialize.")
+        f = float(factor)
+        if not (0.0 <= f <= 1.0):
+            raise ValueError(f"decay factor must be in [0, 1], got {f}")
+        self._g = (self._g * f).detach()
+
     def get_latents(self) -> Dict[str, torch.Tensor]:
         if self._g is None:
             raise RuntimeError("Call reset() first.")
@@ -189,7 +236,13 @@ class CEARAgent(nn.Module):
             M_g = self.enc.obs_enc.build_metric(g_t)
 
         if self.has_body:
-            s_t, body_pred_t = self.state(z_t, p_emb, g_t, M_g=M_g)
+            # body_t_for_modules is the live interoceptive body_state (detached);
+            # the body_head needs it directly to ground body prediction in
+            # current body context (avoid lock-in to past g context across
+            # carried episodes).
+            s_t, body_pred_t = self.state(
+                z_t, p_emb, g_t, M_g=M_g, body_t=body_t_for_modules,
+            )
         else:
             s_t = self.state(z_t, p_emb, g_t, M_g=M_g)
             body_pred_t = None

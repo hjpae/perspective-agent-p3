@@ -1,0 +1,9 @@
+[build] Agent params: 87113
+[build] Decoder params: 5856
+[build] z_fused=20 (z_obs=16 + z_body=4), body_dim=1
+[build] body-coupled: encoder=True policy=True state=True
+[build] body_in_g=True (scale=20.0)  body_err_in_alpha=False  obs_dim=8
+[build] g_carry_decay=0.9  (1.0=full carry, 0.0=full reset)
+[build] silhouette=disabled
+[train] adaptive entropy: init=0.0100 target=0.9657 (=60% of max) bounds=[0.002, 0.05]
+[train] warmup=30 episodes (6000 steps), total=200 episodes
