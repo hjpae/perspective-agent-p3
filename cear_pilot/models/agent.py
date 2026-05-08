@@ -125,6 +125,7 @@ class CEARAgent(nn.Module):
         ablate_g: bool = False,
         err_t: Optional[torch.Tensor] = None,
         body_actual_t: Optional[torch.Tensor] = None,
+        body_silhouette_t: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         if self._g is None:
             self.reset(batch_size=x_t.shape[0])
@@ -142,6 +143,12 @@ class CEARAgent(nn.Module):
             # own prediction).
             body_t_for_modules = body_actual_t.detach()
 
+        # Silhouette: directional affordance felt sense (interoceptive,
+        # blurred). Detach (no backprop into env-noise sample).
+        sil_for_modules: Optional[torch.Tensor] = None
+        if body_silhouette_t is not None:
+            sil_for_modules = body_silhouette_t.to(self.device_).float().detach()
+
         # encoder — body_coupled when encoder.body_dim > 0
         if self.cfg.encoder.body_dim > 0:
             if body_t_for_modules is None:
@@ -149,7 +156,17 @@ class CEARAgent(nn.Module):
                     "encoder.body_dim > 0 but body_actual_t was not provided. "
                     "Phase 3 body-coupled architecture requires body input each step."
                 )
-            z_t, p_emb = self.enc(x_t, p_t, g_t=self._g, body_t=body_t_for_modules)
+            # Validate silhouette presence/absence matches encoder config
+            if int(self.cfg.encoder.silhouette_dim) > 0 and sil_for_modules is None:
+                raise RuntimeError(
+                    "encoder.silhouette_dim > 0 but body_silhouette_t was not "
+                    "provided. Pass body_silhouette_t each step."
+                )
+            z_t, p_emb = self.enc(
+                x_t, p_t, g_t=self._g,
+                body_t=body_t_for_modules,
+                silhouette_t=sil_for_modules,
+            )
         else:
             z_t, p_emb = self.enc(x_t, p_t, g_t=self._g)
 
@@ -217,12 +234,14 @@ class CEARAgent(nn.Module):
         ablate_g: bool = False,
         err_t: Optional[torch.Tensor] = None,
         body_actual_t: Optional[torch.Tensor] = None,
+        body_silhouette_t: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         out = self.forward_step(
             x_t, p_t,
             ablate_g=ablate_g,
             err_t=err_t,
             body_actual_t=body_actual_t,
+            body_silhouette_t=body_silhouette_t,
         )
         action = self.policy.sample_action(out["logits"], greedy=greedy)
         return action, out

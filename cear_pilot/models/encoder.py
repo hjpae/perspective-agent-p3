@@ -73,6 +73,11 @@ class EncoderConfig:
     z_obs_dim: int = 16              # obs-only z dim (must add up with body_z_dim to z_dim if body_dim > 0)
     body_z_dim: int = 4              # body-only z dim
     body_hidden: int = 32            # hidden dim of body encoder MLP
+    # Optional: directional affordance silhouette (interoceptive feature).
+    # When silhouette_dim > 0, BodyEncoder receives [body_state, silhouette]
+    # concatenated as input (dim = body_dim + silhouette_dim).
+    # Default 0 disables — BodyEncoder receives body_state only.
+    silhouette_dim: int = 0
 
     def __post_init__(self):
         if self.body_dim > 0:
@@ -264,16 +269,24 @@ class ProprioEncoder(nn.Module):
 class BodyEncoder(nn.Module):
     """Phase 3 (Layer 2 — Option C): separate encoder for body state.
 
-    Maps body_state (B, body_dim) → z_body (B, body_z_dim).
+    Maps interoceptive input → z_body (B, body_z_dim).
+    Input dimensionality:
+      - body_dim only:                     body_state (e.g. 1-d energy)
+      - body_dim + silhouette_dim:         [body_state, body_silhouette]
+                                            where silhouette is the
+                                            directional (NSEW) affordance
+                                            felt sense (Gaussian-blurred).
+
     The output is concatenated with z_obs to form z_fused, which is what
     gating (FiLM / salience / metric_c1) and downstream modules see.
 
     This instantiates body as part of perception itself (Safron's
     synesthetic affects: interoceptive states infused into other
-    percepts) — body is not a separate value channel but a co-constituent
-    of the perceptual representation.
+    percepts). When silhouette is included, the agent's interoceptive
+    channel carries both the scalar energy state AND a directional
+    affordance silhouette — "어느 정도 직감" of surrounding affordance
+    via body, not via vision.
 
-    Architecture: small MLP with tanh output (matches z_obs activation).
     No g-conditioning here — body's contribution to perception is
     pre-stance, while gating (above) re-weights the *body-coupled*
     perception based on stance g.
@@ -284,10 +297,28 @@ class BodyEncoder(nn.Module):
         self.cfg = cfg
         if cfg.body_dim <= 0:
             raise ValueError("BodyEncoder requires cfg.body_dim > 0")
-        self.mlp = MLP(cfg.body_dim, cfg.body_z_dim, cfg.body_hidden, cfg.dropout)
+        in_dim = cfg.body_dim + max(0, int(cfg.silhouette_dim))
+        self.mlp = MLP(in_dim, cfg.body_z_dim, cfg.body_hidden, cfg.dropout)
 
-    def forward(self, body_t: torch.Tensor) -> torch.Tensor:
-        return torch.tanh(self.mlp(body_t))
+    @property
+    def has_silhouette(self) -> bool:
+        return int(self.cfg.silhouette_dim) > 0
+
+    def forward(
+        self,
+        body_t: torch.Tensor,
+        silhouette_t: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if self.has_silhouette:
+            if silhouette_t is None:
+                raise ValueError(
+                    "BodyEncoder.silhouette_dim > 0 but silhouette_t was not "
+                    "provided."
+                )
+            x = torch.cat([body_t, silhouette_t], dim=-1)
+        else:
+            x = body_t
+        return torch.tanh(self.mlp(x))
 
 
 class EncoderBundle(nn.Module):
@@ -309,20 +340,22 @@ class EncoderBundle(nn.Module):
         p_t: Optional[torch.Tensor] = None,
         g_t: Optional[torch.Tensor] = None,
         body_t: Optional[torch.Tensor] = None,
+        silhouette_t: Optional[torch.Tensor] = None,
     ):
         """Produce (z_t, p_emb).
 
         Pipeline (body_dim > 0):
-            z_obs  = obs_enc(x_t)          # (B, z_obs_dim)  raw
-            z_body = body_enc(body_t)      # (B, body_z_dim)
-            z_fused = concat(z_obs, z_body) # (B, z_dim)
+            z_obs  = obs_enc(x_t)                      # (B, z_obs_dim)  raw
+            z_body = body_enc(body_t [, silhouette_t]) # (B, body_z_dim)
+            z_fused = concat(z_obs, z_body)             # (B, z_dim)
             z_t = obs_enc.apply_gating(z_fused, g_t)
-                                            # gated by g (film/salience),
-                                            # or preserved (metric_c1)
 
         Pipeline (body_dim == 0):
             z_obs = obs_enc(x_t)
             z_t = obs_enc.apply_gating(z_obs, g_t)
+
+        silhouette_t (B, silhouette_dim) is consumed by BodyEncoder when
+        cfg.silhouette_dim > 0; otherwise ignored.
 
         z_t has dim cfg.z_dim regardless.
         """
@@ -333,7 +366,7 @@ class EncoderBundle(nn.Module):
                     "EncoderBundle has body_enc but body_t was not provided. "
                     "Pass body_t to forward()."
                 )
-            z_body = self.body_enc(body_t)
+            z_body = self.body_enc(body_t, silhouette_t=silhouette_t)
             z_fused = torch.cat([z_obs, z_body], dim=-1)
         else:
             z_fused = z_obs

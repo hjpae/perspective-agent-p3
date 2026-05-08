@@ -7,48 +7,50 @@ Continuity with Phase 2:
 - Same world geometry style (sigma gradient, perturbation mechanism)
 - Inherits NZonePhase2Env; only the additions and grid-shape changes below are new
 
-What is new (the "filling of the intentional gap"):
-1. Self-cell observation
-   Phase 1-2 agent perceives only the 8 surrounding cells; the central cell
-   (the agent itself) was an intentional blank. Phase 3 fills it: the patch
-   has 9 cells, with the self-cell at index 8.
+What is new:
 
-2. Per-cell affordance channel
-   Each cell now carries TWO channels:
-     channel 0: env_sample  (or body_state, for the self-cell)
-     channel 1: affordance value at that cell (Position 2: self-cell also
-                carries the affordance of its current cell)
-   So obs_dim = 9 cells x 2 channels = 18.
+1. Pure exteroceptive obs (visual surround only)
+   The agent perceives 8 surrounding cells' env_sample (sigma noise) only.
+   - obs_dim = 8.
+   - Affordance is NOT a visual feature: agent cannot "see" which cells
+     are appetitive vs aversive. Affordance is felt only through body
+     state changes.
+   - Body state is NOT in obs: it enters the agent through a separate
+     interoceptive channel (body input to BodyEncoder + policy).
 
-3. Body state
+2. Body state (interoceptive, separate from obs)
    A minimal scalar (energy, in [body_min, body_max]) carried by the agent.
    It evolves each step via:
        body <- body  - metabolic_cost
                      - movement_cost (if moved)
                      + affordance_at_current_cell * affordance_to_body_gain
-   This is *environment dynamics* (a physical fact, like sigma gradient),
-   not an imposed value function. The agent has no preference about body
-   state; it only learns to predict body dynamics via prediction error.
+   This makes affordance an interoceptive feature: it is felt only
+   through its effect on body. The agent must explore (act) and feel
+   the body change to learn the affordance structure of the environment.
 
-4. Grid redesign (15 x 15 with orthogonal gradients)
+3. Grid layout (15 x 15 with orthogonal gradients)
    - Horizontal axis: perception challenge (sigma gradient, linear).
      Left noisy, right clean. Same role as phase 2.
    - Vertical axis: valence gradient (affordance, sigmoid).
      Top positive (appetitive), bottom negative (aversive).
-   - Two gradients are *orthogonal* — perception and valence are
-     independent dimensions for stance differentiation.
    - 3 horizontal zones (5 cols each) x 3 vertical zones (5 rows each)
      for analytical convenience; gradient itself is smooth.
 
-5. Action consequences flow movement -> body_state -> next observation.
+4. Action consequences flow movement → body_state → next interoception.
    "Action returns to body" architecturally instantiated.
 
 Notes:
-- Environment field still NEVER changes between episodes; sigma gradient
-  and affordance map are static. Differentiation between agents arises
-  through their *history* (body trajectory, perturbation exposure).
+- Environment field still NEVER changes between episodes (during training);
+  sigma gradient and affordance map are static.
+- Differentiation between agents arises through their *history* (body
+  trajectory, perturbation exposure during assay).
 - Phase 1/2 trained checkpoints are NOT obs-compatible with Phase 3
   (obs_dim differs). New training is required for Phase 3 agents.
+
+Architectural commitment summary:
+- exteroceptive (visual) → obs vector (8-dim, env_sample only)
+- interoceptive (body)   → separate body_state input (1-dim)
+- affordance is interoceptive (sensed via body, not visually)
 """
 
 from __future__ import annotations
@@ -71,14 +73,19 @@ from cear_pilot.envs.nzone_phase2 import NZonePhase2Config, NZonePhase2Env
 # Config
 # ---------------------------------------------------------------------------
 
-# 9-cell patch order: 8 surrounding + 1 self at index 8.
-# Self-cell is intentionally placed last so existing 8-cell indexing logic
-# maps cleanly to the surrounding cells [0..7].
+# 8-cell surrounding patch (no self-cell). Body is interoceptive — entered
+# into the agent's representation through a separate body channel
+# (BodyEncoder), not through the obs vector. Removing the self-cell from
+# obs ensures obs is exclusively *exteroceptive* (visual surround).
+#
+# Earlier versions included a self-cell at index 8 carrying body_state and
+# affordance_at_current_cell. That conflated interoceptive (body) with
+# exteroceptive (visual) channels. Phase 3 final commitment: clean
+# separation.
 PHASE3_PATCH_ORDER: Tuple[Tuple[int, int], ...] = (
     (-1, -1), (0, -1), (1, -1),
     (-1,  0),          (1,  0),
     (-1,  1), (0,  1), (1,  1),
-    ( 0,  0),  # self-cell
 )
 
 
@@ -112,9 +119,17 @@ class NZonePhase3Config(NZonePhase2Config):
 
     # ----- observation layout -----
     patch_order: Tuple[Tuple[int, int], ...] = PHASE3_PATCH_ORDER
-    n_channels_per_cell: int = 2
-    # 9 cells * 2 channels = 18; include_xy adds 2 more downstream.
-    obs_dim: int = 18
+    # Single channel: env_sample only. Affordance is *not* visually
+    # perceptible — it is felt only through the body via the affordance →
+    # body-state pathway. Agent must explore to learn the affordance
+    # structure, since visual perception does not directly reveal it.
+    # This is the architectural instantiation of "interoceptive affect":
+    # affordance is a quasi-synesthetic interoceptive feature, not an
+    # exteroceptive feature.
+    n_channels_per_cell: int = 1
+    # 8 surrounding cells × 1 channel = 8. Body is interoceptive (separate
+    # path). Affordance is interoceptive (felt through body changes only).
+    obs_dim: int = 8
 
     # ----- body state -----
     body_dim: int = 1
@@ -134,6 +149,18 @@ class NZonePhase3Config(NZonePhase2Config):
     movement_cost: float = 0.01
     affordance_to_body_gain: float = 0.10
 
+    # ----- body silhouette (optional, toggleable) -----
+    # When silhouette_dim > 0, the env produces a body_silhouette feature
+    # in info dict: a directional affordance "felt sense" of the agent's
+    # 4 cardinal neighbors (N, S, W, E), with Gaussian noise σ.
+    # This instantiates "어느 정도 직감" — partial/blurred interoceptive
+    # sense of surrounding affordance via body. Visual perception remains
+    # affordance-blind; silhouette is interoceptive.
+    # silhouette_dim = 0 disables (agent receives only body_state, 1-d).
+    # silhouette_dim = 4 enables N/S/W/E directional silhouette.
+    silhouette_dim: int = 0
+    silhouette_noise_sigma: float = 0.2
+
     # ----- termination -----
     terminate_on_body_min: bool = False
 
@@ -144,8 +171,6 @@ class NZonePhase3Config(NZonePhase2Config):
 
 class NZonePhase3Env(NZonePhase2Env):
     """Minimal embodied extension of Phase 2."""
-
-    SELF_CELL_INDEX: int = 8  # index of (0, 0) in PHASE3_PATCH_ORDER
 
     def __init__(
         self,
@@ -222,26 +247,21 @@ class NZonePhase3Env(NZonePhase2Env):
         Optionally appends normalized (x, y) if cfg.include_xy.
         """
         n_cells = len(self.cfg3.patch_order)
-        n_chan = int(self.cfg3.n_channels_per_cell)
-        obs = np.zeros((n_cells, n_chan), dtype=np.float32)
+        # Single-channel obs: env_sample only. Affordance is interoceptive
+        # (entered into the agent only through body state dynamics, not as
+        # a visual feature). Body is also interoceptive (separate body
+        # encoder path).
+        obs = np.zeros((n_cells,), dtype=np.float32)
 
         for i, (dx, dy) in enumerate(self.cfg3.patch_order):
-            is_self = (dx == 0 and dy == 0)
-            if is_self:
-                obs[i, 0] = float(self.body_state[0])
-                # Position 2: self-cell ch1 = current cell's affordance
-                obs[i, 1] = float(self._affordance_map[self.y, self.x])
-            else:
-                obs[i, 0] = self._sample_cell(self.x + dx, self.y + dy)
-                px, py = self._patch_coord(self.x + dx, self.y + dy)
-                obs[i, 1] = float(self._affordance_map[py, px])
+            obs[i] = self._sample_cell(self.x + dx, self.y + dy)
 
-        # Apply perturbation distortion only to surrounding cells' env-sample channel.
+        # Apply perturbation distortion to env-sample channel.
         if self._perturbation_active:
             distortion = self._perturbation_distortion_per_cell()
-            obs[:, 0] += distortion
+            obs += distortion
 
-        flat = obs.reshape(-1)
+        flat = obs  # already 1-D shape (n_cells,)
 
         if self.cfg.include_xy:
             xy = np.array(
@@ -256,14 +276,15 @@ class NZonePhase3Env(NZonePhase2Env):
         return flat.astype(np.float32)
 
     def _perturbation_distortion_per_cell(self) -> np.ndarray:
-        """Phase 2 distortion adapted to 9-cell layout. Self-cell unaffected
-        (body state is internal; environmental distortion does not apply)."""
+        """Phase 2 obs distortion, applied to all 8 surrounding cells'
+        env_sample channel. Note: this is *exteroceptive* perturbation
+        (sigma-channel noise). The Phase 3 commitment is to add a separate
+        *affordance perturbation* mechanism later, which is not yet
+        instantiated here."""
         scale = float(self.cfg.perturbation_scale)
         n_cells = len(self.cfg3.patch_order)
         distortion = np.zeros(n_cells, dtype=np.float32)
         for i, (dx, dy) in enumerate(self.cfg3.patch_order):
-            if dx == 0 and dy == 0:
-                continue
             px, _ = self._patch_coord(self.x + dx, self.y + dy)
             distortion[i] = scale * self._inversion_pattern[px]
         return distortion
@@ -335,6 +356,31 @@ class NZonePhase3Env(NZonePhase2Env):
 
     # ----- info -----
 
+    # ----- body silhouette (interoceptive) -----
+
+    def _compute_body_silhouette(self) -> Optional[np.ndarray]:
+        """Return 4-d directional affordance silhouette for the agent's
+        N/S/W/E cardinal neighbors (in that order), with Gaussian blur.
+
+        This is *interoceptive*: the agent feels (through body) the
+        affordance of the cells it is adjacent to, but with noise — only
+        a "silhouette" of the directional affordance structure.
+
+        Returns None when silhouette_dim == 0 (feature disabled).
+        """
+        if int(self.cfg3.silhouette_dim) <= 0:
+            return None
+        # Cardinal neighbors: N=(0,-1), S=(0,+1), W=(-1,0), E=(+1,0).
+        cardinals = [(0, -1), (0, 1), (-1, 0), (1, 0)]
+        sigma = float(self.cfg3.silhouette_noise_sigma)
+        out = np.zeros(4, dtype=np.float32)
+        for i, (dx, dy) in enumerate(cardinals):
+            px, py = self._patch_coord(self.x + dx, self.y + dy)
+            clean = float(self._affordance_map[py, px])
+            noise = float(self._rng.normal(0.0, sigma)) if sigma > 0.0 else 0.0
+            out[i] = clean + noise
+        return out
+
     def _info_dict(self) -> Dict[str, Any]:
         info = super()._info_dict()
         info["body_state"] = float(self.body_state[0])
@@ -342,6 +388,9 @@ class NZonePhase3Env(NZonePhase2Env):
         info["valence_zone_id"] = int(self.valence_zone_id(self.y))
         info["metabolic_delta"] = float(self._last_metabolic_delta)
         info["affordance_gain"] = float(self._last_affordance_gain)
+        sil = self._compute_body_silhouette()
+        if sil is not None:
+            info["body_silhouette"] = sil
         return info
 
 
@@ -356,12 +405,12 @@ def make_env(**kwargs) -> NZonePhase3Env:
 if __name__ == "__main__":
     env = make_env()
     obs, info = env.reset(seed=0)
-    print(f"obs shape: {obs.shape}  (expected (18,))")
+    print(f"obs shape: {obs.shape}  (expected (16,) — 8 surrounding cells × 2 channels)")
     print(f"observation_space: {env.observation_space}")
     print(f"grid: {env.W} x {env.H}, start: ({env.x}, {env.y})")
-    print(f"initial body_state: {info['body_state']:.4f}")
+    print(f"initial body_state: {info['body_state']:.4f}  (interoceptive, separate from obs)")
     print(f"initial affordance_here: {info['affordance_here']:+.4f}  "
-          f"(valence zone {info['valence_zone_id']})")
+          f"(valence zone {info['valence_zone_id']}, env-internal — not in obs)")
     print(f"perturbation_steps: {env.perturbation_steps}")
 
     print(f"\naffordance map (vertical gradient, sample column 7):")
@@ -375,13 +424,10 @@ if __name__ == "__main__":
     actions = [env.ACTION_UP] * 5 + [env.ACTION_STAY] * 2 + [env.ACTION_DOWN] * 3
     for action in actions:
         obs, r, term, trunc, info = env.step(action)
-        self_ch0 = obs[2 * env.SELF_CELL_INDEX]
-        self_ch1 = obs[2 * env.SELF_CELL_INDEX + 1]
         action_name = ["UP", "DOWN", "LEFT", "RIGHT", "STAY"][action]
         print(
             f"  t={info['t']:3d}  {action_name:5s}  pos=({info['x']:2d},{info['y']:2d})  "
             f"vz={info['valence_zone_id']}  "
             f"body={info['body_state']:.4f}  "
-            f"afford_here={info['affordance_here']:+.3f}  "
-            f"self=(b={self_ch0:.3f}, a={self_ch1:+.3f})"
+            f"afford_here={info['affordance_here']:+.3f}"
         )

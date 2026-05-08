@@ -159,7 +159,7 @@ def build_agent_and_decoder(args):
     # - State head uses z_fused (20-dim) for both s prediction and
     #   body prediction; metric_c1 builds M_g over the full 20-dim space.
     enc_cfg = EncoderConfig(
-        obs_dim=18,
+        obs_dim=8,
         proprio_dim=5,
         z_dim=args.z_dim,                # fused dim (default 20)
         z_obs_dim=args.z_obs_dim,        # default 16
@@ -171,6 +171,7 @@ def build_agent_and_decoder(args):
         gating_mode=args.gating_mode,
         body_dim=BODY_DIM,                # 1
         body_hidden=32,
+        silhouette_dim=int(args.silhouette_dim),
     )
 
     world_cfg = WorldLatentConfig(
@@ -184,6 +185,8 @@ def build_agent_and_decoder(args):
         use_error_feedback=True,
         err_dim=ERR_DIM,
         body_err_dim=BODY_DIM,
+        body_in_g=bool(args.body_in_g),
+        body_g_scale=float(args.body_g_scale),
     )
 
     # Auto-set use_metric based on encoder mode
@@ -216,7 +219,7 @@ def build_agent_and_decoder(args):
     dec_cfg = DecoderConfig(
         g_dim=enc_cfg.g_dim,
         n_actions=5,
-        obs_dim=18,
+        obs_dim=8,
         hidden=64,
     )
     decoder = ObsDecoder(dec_cfg)
@@ -227,6 +230,12 @@ def build_agent_and_decoder(args):
           f"z_body={enc_cfg.body_z_dim}), body_dim={enc_cfg.body_dim}")
     print(f"[build] body-coupled: encoder={enc_cfg.body_dim>0} "
           f"policy={policy_cfg.body_dim>0} state={state_cfg.body_dim>0}")
+    print(f"[build] body_in_g={world_cfg.body_in_g} "
+          f"(scale={world_cfg.body_g_scale})  obs_dim={enc_cfg.obs_dim}")
+    sil_str = (f"silhouette_dim={enc_cfg.silhouette_dim} "
+               f"(σ={args.silhouette_sigma})"
+               if enc_cfg.silhouette_dim > 0 else "silhouette=disabled")
+    print(f"[build] {sil_str}")
 
     return agent, decoder
 
@@ -256,6 +265,8 @@ def train(args):
         metabolic_cost=args.metabolic_cost,
         movement_cost=args.movement_cost,
         affordance_to_body_gain=args.affordance_gain,
+        silhouette_dim=int(args.silhouette_dim),
+        silhouette_noise_sigma=float(args.silhouette_sigma),
     )
     env = NZonePhase3Env(config=env_cfg)
 
@@ -346,11 +357,21 @@ def train(args):
                 [[float(info["body_state"])]],
                 dtype=torch.float32, device=device,
             )
+            # Phase 3 (optional): body silhouette — directional NSEW
+            # affordance silhouette via body, with Gaussian blur.
+            # None when silhouette_dim == 0 (env didn't produce it).
+            body_silhouette_t: Optional[torch.Tensor] = None
+            if "body_silhouette" in info:
+                body_silhouette_t = torch.tensor(
+                    info["body_silhouette"][None, :],   # (1, 4)
+                    dtype=torch.float32, device=device,
+                )
 
             out = agent.forward_step(
                 x_t, p_t,
                 err_t=err_t,
                 body_actual_t=body_actual_t,
+                body_silhouette_t=body_silhouette_t,
             )
             # logits returned by forward_step come from policy(s_t) WITHOUT
             # stop-gradient. We compute a separate set of "actor logits" from
@@ -407,20 +428,24 @@ def train(args):
             #   c_t = MSE(decoder(g_t, a_t), obs_{t+1}) + λ · body_PE
             # This instantiates Layer 1 (instinct): the agent's
             # predictability-seeking is grounded both in visual stability
-            # AND body stability. Edge attractor in obs space is tempered
-            # by body cost when body decays.
+            # ─── Actor cost = obs prediction error + body prediction error ───
+            # Layer 1 cost combines two grounded prediction errors:
+            #   obs_cost  = MSE(decoder(g, a), x_next)  — visual predictability
+            #   body_pe²  = (body_pred - body_actual)²  — interoceptive surprisal
+            # cost_t = obs_cost + λ_body · body_pe²
+            #
+            # Both terms are squared prediction errors. The agent's actor
+            # learns to minimize cost — i.e., select actions that produce
+            # both predictable visual outcomes and predictable body
+            # outcomes. Body PE squared (not body deviation from a target)
+            # keeps the cost interpretation as predictive: body is a
+            # learnable signal whose stability the agent seeks via action.
             #
             # Sign convention (matches phase 1 train_phase1.py:344):
             #   advantage = baseline - cost
-            # → low cost (good action) yields *positive* advantage
-            # → loss = -(advantage · log π); minimizing loss = increasing log π
-            #   for low-cost actions = strengthening preference for them.
+            # → low cost (good action) yields *positive* advantage.
             xhat_executed = xhat_all[0, a_int].unsqueeze(0)       # (1, obs_dim)
             obs_cost = F.mse_loss(xhat_executed, x_next).detach().item()
-            # Body PE magnitude (squared) for cost term. body_pred_t was
-            # produced *before* the action, body_actual_next is the post-
-            # action body state — so body_PE^2 = squared interoceptive
-            # surprisal, matching obs_PE which is squared visual surprisal.
             body_pe_squared = float(
                 ((body_pred_t - body_actual_next) ** 2).detach().item()
             )
@@ -633,7 +658,7 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--episodes", type=int, default=250)
+    ap.add_argument("--episodes", type=int, default=200)
     ap.add_argument("--max_steps", type=int, default=300)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--clip_grad", type=float, default=1.0)
@@ -651,19 +676,44 @@ def parse_args():
                     help="Body-only z dim (output of BodyEncoder).")
 
     # ── Layer 1 cost design ────────────────────────────────────────
-    # Actor cost = obs_PE + lambda_body * body_PE.
-    # lambda_body=0 disables body PE in actor cost (Layer 1 obs-only).
-    # lambda_body~3 makes body PE substantial alongside obs PE in the
-    # cost signal that drives policy.
+    # Actor cost = obs_PE + λ_body · body_PE².
+    # Both components are squared prediction errors. lambda_body=0
+    # disables body PE in actor cost. lambda_body~3 makes body PE
+    # substantial alongside obs PE.
     ap.add_argument("--lambda_body", type=float, default=3.0,
-                    help="Weight of body PE in actor cost. cost_t = obs_PE + "
-                         "lambda_body * body_PE.")
+                    help="Weight of body PE² in actor cost. "
+                         "cost_t = obs_PE + λ · (body_pred - body_actual)².")
+
+    # ── Phase 3 commitment (III): body PE → g GRU update content ──
+    # When True, body_err_t (signed scalar) is concatenated into the GRU
+    # input (scaled by body_g_scale) in addition to its existing AlphaNet
+    # role. Asymmetric: env PE → AlphaNet only; body PE → both AlphaNet
+    # and g GRU update content. Rationale: interoceptive grounding of
+    # subjectivity (body PE is constitutive of g, not just a plasticity
+    # rate driver).
+    ap.add_argument("--body_in_g", action="store_true", default=True,
+                    help="Route body PE into the g GRU update content.")
+    ap.add_argument("--no_body_in_g", action="store_false", dest="body_in_g",
+                    help="Disable body PE → g GRU (ablation).")
+    ap.add_argument("--body_g_scale", type=float, default=20.0,
+                    help="Scale factor for body_err_t in GRU input "
+                         "(body PE magnitude ~0.05; scale to ~1.0).")
+
+    # ── Body silhouette (interoceptive directional affordance) ──
+    # silhouette_dim=0 disables (BodyEncoder receives only body_state).
+    # silhouette_dim=4 enables NSEW directional silhouette with Gaussian
+    # noise σ. This is "어느 정도 직감" — the agent feels (through body)
+    # the affordance of its 4 cardinal neighbors, blurred by σ.
+    ap.add_argument("--silhouette_dim", type=int, default=0,
+                    help="Body silhouette dim. 0 disables, 4 enables NSEW.")
+    ap.add_argument("--silhouette_sigma", type=float, default=0.2,
+                    help="Gaussian noise σ for silhouette (0 = clean).")
 
     # AAAI/phase 1-style learning objective + warm-up
     # Warm-up: actor objective disabled for the first warmup_episodes,
     # during which only obs prediction + body prediction train the backbone.
     # Default 50 episodes matches AAAI's ratio (~25% of training).
-    ap.add_argument("--warmup_episodes", type=int, default=50)
+    ap.add_argument("--warmup_episodes", type=int, default=30)
     ap.add_argument("--w_actor", type=float, default=0.5)
     ap.add_argument("--w_smooth", type=float, default=0.25)
     # Adaptive entropy weight (AAAI/phase 1 spec)
@@ -702,9 +752,10 @@ def parse_args():
     # Body loss weight (training scaling, not runtime preference)
     ap.add_argument("--body_loss_weight", type=float, default=1.0)
 
-    # Encoder gating mode. metric_c1 is the Phase 3 main commitment;
-    # film and salience are sanity-check baselines.
-    ap.add_argument("--gating_mode", type=str, default="film",
+    # Encoder gating mode. metric_c1 is the Phase 3 main commitment
+    # (default). film, salience, and "both" are sanity-check baselines /
+    # ablations: pass --gating_mode <name> to use them.
+    ap.add_argument("--gating_mode", type=str, default="metric_c1",
                     choices=["film", "salience", "metric_c1", "both"])
 
     ap.add_argument("--mixed_schedule", type=str, default="",

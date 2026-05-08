@@ -46,6 +46,16 @@ class WorldLatentConfig:
     # body_err_dim = 0 disables it (phase 1-2 compat).
     body_err_dim: int = 0
 
+    # Phase 3 commitment (III): body PE also enters the g GRU update path.
+    # Rationale: while env PE modulates only plasticity rate (AlphaNet),
+    # interoceptive body PE is part of the *content* of perspective
+    # (Safron's "interoceptive body as primordial substrate of subjectivity").
+    # Asymmetric: env PE → AlphaNet only; body PE → AlphaNet + g GRU input.
+    # When body_in_g=True, GRU input becomes [z_t, p_emb, body_err_t * body_g_scale].
+    body_in_g: bool = False
+    body_g_scale: float = 20.0  # scale up body_err_t (~0.05 magnitude) to be
+                                # comparable to z_t/p_emb (~1.0 magnitude).
+
     g_damping: float = 0.10  # legacy fallback
 
 
@@ -54,8 +64,14 @@ class WorldLatent(nn.Module):
         super().__init__()
         self.cfg = cfg
 
+        # GRU input: z_t + p_emb [+ body_err_t * scale] when body_in_g=True.
+        # body_err_t (1-d, signed) directly enters the perspective update
+        # content — interoceptive grounding of subjectivity.
+        gru_in_dim = cfg.z_dim + cfg.p_dim
+        if cfg.body_in_g and int(cfg.body_err_dim) > 0:
+            gru_in_dim += int(cfg.body_err_dim)
         self.gru = nn.GRUCell(
-            input_size=cfg.z_dim + cfg.p_dim,
+            input_size=gru_in_dim,
             hidden_size=cfg.g_dim,
         )
         self.ln = nn.LayerNorm(cfg.g_dim) if cfg.layernorm else nn.Identity()
@@ -136,7 +152,19 @@ class WorldLatent(nn.Module):
         err_t: Optional[torch.Tensor] = None,
         body_err_t: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        x = torch.cat([z_t, p_emb], dim=-1)
+        # GRU input: [z_t, p_emb, body_err_t * scale] when body_in_g=True.
+        # body_err_t enters the perspective update content (Phase 3
+        # commitment III: interoceptive PE is constitutive of subjectivity).
+        gru_parts = [z_t, p_emb]
+        if (self.cfg.body_in_g and int(self.cfg.body_err_dim) > 0
+                and body_err_t is not None):
+            be = body_err_t.to(device=g_prev.device, dtype=g_prev.dtype)
+            if be.ndim == 1:
+                be = be.unsqueeze(0)
+            if be.shape[0] == 1 and g_prev.shape[0] > 1:
+                be = be.expand(g_prev.shape[0], -1)
+            gru_parts.append(be * float(self.cfg.body_g_scale))
+        x = torch.cat(gru_parts, dim=-1)
         h_t = self.ln(self.gru(x, g_prev))
 
         alpha_t = self._compute_alpha(g_prev, z_t, p_emb, err_t, body_err_t)
