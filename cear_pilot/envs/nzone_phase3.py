@@ -121,14 +121,18 @@ class NZonePhase3Config(NZonePhase2Config):
     body_init: float = 0.5
     body_min: float = 0.0
     body_max: float = 1.0
-    # Defaults chosen via random-walk diagnostic (see diagnose_phase3_env.py):
-    # this regime gives strong delta_body↔affordance coupling (corr ~0.68 under
-    # random policy) with moderate body range (~0.56). Saturation under
-    # random policy is non-trivial (~0.26 at body_min) but is a worst-case
-    # baseline; trained agents are expected to manage body better. Tunable.
-    metabolic_cost: float = 0.002
-    movement_cost: float = 0.002
-    affordance_to_body_gain: float = 0.02
+    # Body dynamics magnitudes — amplified for the body-coupled architecture.
+    # Original (Apr 2026 minimal embodiment): metabolic_cost=0.002,
+    # movement_cost=0.002, affordance_to_body_gain=0.02. Step-wise body
+    # change ~0.01 max → body PE ~1e-4. Too small to be a meaningful
+    # learning signal once body PE is integrated into actor cost and used
+    # as a body encoder input (Layer 1 + Layer 2 commitments).
+    # Amplified (May 2026): step-wise body change up to ~0.05, body PE
+    # comfortably in 1e-3 to 1e-2 range, body state ranging meaningfully
+    # in [0, 1] within a 300-step episode under non-trivial behavior.
+    metabolic_cost: float = 0.01
+    movement_cost: float = 0.01
+    affordance_to_body_gain: float = 0.10
 
     # ----- termination -----
     terminate_on_body_min: bool = False

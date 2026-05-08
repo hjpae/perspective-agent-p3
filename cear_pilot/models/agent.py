@@ -52,6 +52,19 @@ class CEARAgent(nn.Module):
                 f"state.body_dim ({cfg.state.body_dim}) must equal "
                 f"world.body_err_dim ({cfg.world.body_err_dim})"
             )
+        # Phase 3 body-coupled architecture: encoder.body_dim and
+        # policy.body_dim must match state.body_dim (single raw body dim
+        # propagated through encoder, policy, state head).
+        if cfg.encoder.body_dim > 0:
+            assert cfg.encoder.body_dim == cfg.state.body_dim, (
+                f"encoder.body_dim ({cfg.encoder.body_dim}) must equal "
+                f"state.body_dim ({cfg.state.body_dim})"
+            )
+        if cfg.policy.body_dim > 0:
+            assert cfg.policy.body_dim == cfg.state.body_dim, (
+                f"policy.body_dim ({cfg.policy.body_dim}) must equal "
+                f"state.body_dim ({cfg.state.body_dim})"
+            )
         # metric_c1 + use_metric must agree
         if cfg.encoder.gating_mode == "metric_c1" and not cfg.state.use_metric:
             raise ValueError("encoder gating_mode='metric_c1' requires "
@@ -118,13 +131,27 @@ class CEARAgent(nn.Module):
 
         # Body PE (signed) — feedback signal, not a backprop path
         body_pe: Optional[torch.Tensor] = None
+        body_t_for_modules: Optional[torch.Tensor] = None
         if self.has_body and body_actual_t is not None and self._body_pred_prev is not None:
             body_actual_t = body_actual_t.to(self.device_).float()
             body_pe = body_actual_t - self._body_pred_prev
             body_pe = body_pe.detach()
+            # body_t_for_modules is the *current actual body state*, used as
+            # input to the body encoder and the policy. This is a live
+            # interoceptive signal (not a backprop quantity from the agent's
+            # own prediction).
+            body_t_for_modules = body_actual_t.detach()
 
-        # encoder
-        z_t, p_emb = self.enc(x_t, p_t, g_t=self._g)
+        # encoder — body_coupled when encoder.body_dim > 0
+        if self.cfg.encoder.body_dim > 0:
+            if body_t_for_modules is None:
+                raise RuntimeError(
+                    "encoder.body_dim > 0 but body_actual_t was not provided. "
+                    "Phase 3 body-coupled architecture requires body input each step."
+                )
+            z_t, p_emb = self.enc(x_t, p_t, g_t=self._g, body_t=body_t_for_modules)
+        else:
+            z_t, p_emb = self.enc(x_t, p_t, g_t=self._g)
 
         # world latent — alpha modulated by env PE + body PE
         if ablate_g:
@@ -150,7 +177,15 @@ class CEARAgent(nn.Module):
             s_t = self.state(z_t, p_emb, g_t, M_g=M_g)
             body_pred_t = None
 
-        logits = self.policy(s_t)
+        # policy — body_coupled when policy.body_dim > 0
+        if self.cfg.policy.body_dim > 0:
+            if body_t_for_modules is None:
+                raise RuntimeError(
+                    "policy.body_dim > 0 but body_actual_t was not provided."
+                )
+            logits = self.policy(s_t, body_t=body_t_for_modules)
+        else:
+            logits = self.policy(s_t)
 
         self._g = g_t.detach()
         self._alpha = alpha_t.detach()

@@ -47,6 +47,9 @@ import torch.nn as nn
 class EncoderConfig:
     obs_dim: int = 8
     proprio_dim: int = 5
+    # z_dim is the *fused* z dimension (what downstream modules see).
+    # When body_dim > 0, z_dim = z_obs_dim + body_z_dim.
+    # When body_dim == 0, z_dim = z_obs_dim and there is no body encoder.
     z_dim: int = 16
     p_dim: int = 8
     g_dim: int = 12
@@ -57,6 +60,35 @@ class EncoderConfig:
     # metric_c1 settings
     metric_epsilon: float = 0.1     # added to L L^T for positive definiteness
     metric_hidden: int = 64         # hidden dim of MLP that produces L_g entries
+    # ── Phase 3 body-coupled architecture (Layer 2 — Option C) ────────
+    # When body_dim > 0, a separate BodyEncoder produces z_body of dim
+    # body_z_dim, and z_obs of dim z_obs_dim is produced from obs only.
+    # z_fused = concat(z_obs, z_body) has dim z_dim, which is what
+    # downstream (state_head, decoder, world_latent, metric_c1) sees
+    # as the *effective z dimension*.
+    # Constraint when body_dim > 0: z_obs_dim + body_z_dim must equal z_dim.
+    # Default body_dim=0 keeps phase 1/2 backward compatibility (no body
+    # encoder, all encoder capacity goes to obs, z_dim = z_obs_dim).
+    body_dim: int = 0                # raw body state dim (e.g. 1 scalar)
+    z_obs_dim: int = 16              # obs-only z dim (must add up with body_z_dim to z_dim if body_dim > 0)
+    body_z_dim: int = 4              # body-only z dim
+    body_hidden: int = 32            # hidden dim of body encoder MLP
+
+    def __post_init__(self):
+        if self.body_dim > 0:
+            if self.z_obs_dim + self.body_z_dim != self.z_dim:
+                raise ValueError(
+                    f"body_dim>0 requires z_obs_dim ({self.z_obs_dim}) + "
+                    f"body_z_dim ({self.body_z_dim}) = z_dim ({self.z_dim}); "
+                    f"got {self.z_obs_dim + self.body_z_dim}."
+                )
+        else:
+            # body_dim == 0: z_obs_dim must equal z_dim
+            if self.z_obs_dim != self.z_dim:
+                # Auto-fix for back-compat: if user did not set z_obs_dim,
+                # silently align it.
+                self.z_obs_dim = self.z_dim
+                self.body_z_dim = 0
 
 
 class MLP(nn.Module):
@@ -80,27 +112,35 @@ class ObservationEncoder(nn.Module):
     def __init__(self, cfg: EncoderConfig):
         super().__init__()
         self.cfg = cfg
-        self.mlp = MLP(cfg.obs_dim, cfg.z_dim, cfg.hidden, cfg.dropout)
+        # ObservationEncoder produces z_obs of dim z_obs_dim.
+        # When body_dim == 0, z_obs_dim == z_dim (no body encoder, no fusion).
+        self.mlp = MLP(cfg.obs_dim, cfg.z_obs_dim, cfg.hidden, cfg.dropout)
 
         mode = (cfg.gating_mode or "film").lower()
         if mode not in ("film", "salience", "metric_c1", "both"):
             raise ValueError(f"unknown gating_mode: {cfg.gating_mode}")
 
+        # FiLM / salience operate on the *fused* z (z_dim), so they take g_t
+        # and produce a (z_dim,) modulation. The body encoder produces z_body
+        # ungated (body state is an internal signal, not stance-modulated).
+        # Metric_c1 builds M_g as (z_dim, z_dim) over the fused z.
+        z_full = cfg.z_dim                    # fused dim seen by gating
+
         # FiLM branch (mode in {"film", "both"})
         if cfg.use_salience_gate and mode in ("film", "both"):
-            self.film = nn.Linear(cfg.g_dim, cfg.z_dim * 2)
+            self.film = nn.Linear(cfg.g_dim, z_full * 2)
             nn.init.zeros_(self.film.weight)
             nn.init.zeros_(self.film.bias)
 
         # Salience branch (mode in {"salience", "both"})
         if cfg.use_salience_gate and mode in ("salience", "both"):
-            self.salience = nn.Linear(cfg.g_dim, cfg.z_dim)
+            self.salience = nn.Linear(cfg.g_dim, z_full)
             nn.init.zeros_(self.salience.weight)
             nn.init.zeros_(self.salience.bias)
 
         # Metric C-1 branch (mode == "metric_c1")
         if mode == "metric_c1":
-            n_lower = cfg.z_dim * (cfg.z_dim + 1) // 2  # entries of lower-triangular
+            n_lower = z_full * (z_full + 1) // 2  # entries of lower-triangular over fused z
             self.metric_mlp = MLP(cfg.g_dim, n_lower,
                                   hidden=cfg.metric_hidden, dropout=cfg.dropout)
             # zero-init last layer so L_g starts at 0 → M_g = epsilon * I
@@ -108,26 +148,28 @@ class ObservationEncoder(nn.Module):
             if isinstance(last, nn.Linear):
                 nn.init.zeros_(last.weight)
                 nn.init.zeros_(last.bias)
-            # Precompute lower-triangular indices (z_dim, z_dim) → (n_lower,)
-            tril_idx = torch.tril_indices(cfg.z_dim, cfg.z_dim, offset=0)
+            # Precompute lower-triangular indices (z_full, z_full) → (n_lower,)
+            tril_idx = torch.tril_indices(z_full, z_full, offset=0)
             self.register_buffer("tril_row", tril_idx[0])
             self.register_buffer("tril_col", tril_idx[1])
-            # epsilon scaled identity for positive definiteness
+            # epsilon scaled identity for positive definiteness (over fused z)
             self.register_buffer("metric_eye",
-                                 torch.eye(cfg.z_dim) * float(cfg.metric_epsilon))
+                                 torch.eye(z_full) * float(cfg.metric_epsilon))
 
     @property
     def gating_mode(self) -> str:
         return (self.cfg.gating_mode or "film").lower()
 
     def _build_metric(self, g_t: torch.Tensor) -> torch.Tensor:
-        """Build M_g = L L^T + epsilon * I (positive definite) per batch."""
+        """Build M_g = L L^T + epsilon * I (positive definite) per batch.
+        M_g is over the *fused* z dimension (z_dim), so it modulates both
+        z_obs and z_body when the body encoder is active."""
         B = g_t.shape[0]
-        z_dim = self.cfg.z_dim
+        z_full = self.cfg.z_dim
         l_entries = self.metric_mlp(g_t)              # (B, n_lower)
 
         # Construct lower-triangular L_g
-        L = torch.zeros(B, z_dim, z_dim,
+        L = torch.zeros(B, z_full, z_full,
                         device=g_t.device, dtype=g_t.dtype)
         # Apply softplus to diagonal entries to ensure positive diagonals
         # (this makes M_g strictly positive definite, not just semi-definite)
@@ -142,26 +184,30 @@ class ObservationEncoder(nn.Module):
         M = torch.bmm(L, L.transpose(-2, -1)) + self.metric_eye.unsqueeze(0)
         return M
 
-    def forward(
+    def forward(self, x_t: torch.Tensor) -> torch.Tensor:
+        """Returns z_obs (raw, ungated). Gating is applied at the
+        EncoderBundle level after fusion with z_body, so that body-coupled
+        perception is what the gating modulates."""
+        return torch.tanh(self.mlp(x_t))
+
+    def apply_gating(
         self,
-        x_t: torch.Tensor,
+        z_fused: torch.Tensor,
         g_t: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Returns z_t. For metric_c1 mode, z_t IS z_raw (no in-encoder gating);
-        the metric M_g is consumed downstream via gating_params() / state head.
-        """
-        z_raw = torch.tanh(self.mlp(x_t))
-
+        """Apply g-conditioned gating to the fused z (z_obs ⊕ z_body).
+        For metric_c1, z_fused is preserved (M_g delivered separately
+        via build_metric). For film/salience, modulation is applied
+        to z_fused as a whole — body-coupled perception."""
         if g_t is None or not self.cfg.use_salience_gate:
-            return z_raw
+            return z_fused
 
         mode = self.gating_mode
         if mode == "metric_c1":
-            # z_raw is preserved; metric is delivered through gating_params()
-            return z_raw
+            # z_fused preserved; metric M_g consumed downstream
+            return z_fused
 
-        z_t = z_raw
+        z_t = z_fused
         if mode in ("film", "both") and hasattr(self, "film"):
             gamma, beta = self.film(g_t).chunk(2, dim=-1)
             z_t = (1.0 + gamma) * z_t + beta
@@ -215,20 +261,86 @@ class ProprioEncoder(nn.Module):
         return torch.tanh(self.mlp(p_t))
 
 
+class BodyEncoder(nn.Module):
+    """Phase 3 (Layer 2 — Option C): separate encoder for body state.
+
+    Maps body_state (B, body_dim) → z_body (B, body_z_dim).
+    The output is concatenated with z_obs to form z_fused, which is what
+    gating (FiLM / salience / metric_c1) and downstream modules see.
+
+    This instantiates body as part of perception itself (Safron's
+    synesthetic affects: interoceptive states infused into other
+    percepts) — body is not a separate value channel but a co-constituent
+    of the perceptual representation.
+
+    Architecture: small MLP with tanh output (matches z_obs activation).
+    No g-conditioning here — body's contribution to perception is
+    pre-stance, while gating (above) re-weights the *body-coupled*
+    perception based on stance g.
+    """
+
+    def __init__(self, cfg: EncoderConfig):
+        super().__init__()
+        self.cfg = cfg
+        if cfg.body_dim <= 0:
+            raise ValueError("BodyEncoder requires cfg.body_dim > 0")
+        self.mlp = MLP(cfg.body_dim, cfg.body_z_dim, cfg.body_hidden, cfg.dropout)
+
+    def forward(self, body_t: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(self.mlp(body_t))
+
+
 class EncoderBundle(nn.Module):
     def __init__(self, cfg: EncoderConfig):
         super().__init__()
         self.cfg = cfg
         self.obs_enc = ObservationEncoder(cfg)
         self.prop_enc = ProprioEncoder(cfg)
+        # Optional body encoder: only constructed when body_dim > 0.
+        # Phase 1/2 ckpts (body_dim=0) load cleanly because this attribute
+        # does not exist for them.
+        self.has_body_encoder = (cfg.body_dim > 0)
+        if self.has_body_encoder:
+            self.body_enc = BodyEncoder(cfg)
 
     def forward(
         self,
         x_t: torch.Tensor,
         p_t: Optional[torch.Tensor] = None,
         g_t: Optional[torch.Tensor] = None,
+        body_t: Optional[torch.Tensor] = None,
     ):
-        z_t = self.obs_enc(x_t, g_t=g_t)
+        """Produce (z_t, p_emb).
+
+        Pipeline (body_dim > 0):
+            z_obs  = obs_enc(x_t)          # (B, z_obs_dim)  raw
+            z_body = body_enc(body_t)      # (B, body_z_dim)
+            z_fused = concat(z_obs, z_body) # (B, z_dim)
+            z_t = obs_enc.apply_gating(z_fused, g_t)
+                                            # gated by g (film/salience),
+                                            # or preserved (metric_c1)
+
+        Pipeline (body_dim == 0):
+            z_obs = obs_enc(x_t)
+            z_t = obs_enc.apply_gating(z_obs, g_t)
+
+        z_t has dim cfg.z_dim regardless.
+        """
+        z_obs = self.obs_enc(x_t)
+        if self.has_body_encoder:
+            if body_t is None:
+                raise ValueError(
+                    "EncoderBundle has body_enc but body_t was not provided. "
+                    "Pass body_t to forward()."
+                )
+            z_body = self.body_enc(body_t)
+            z_fused = torch.cat([z_obs, z_body], dim=-1)
+        else:
+            z_fused = z_obs
+
+        # Apply g-conditioned gating to the (possibly body-coupled) fused z
+        z_t = self.obs_enc.apply_gating(z_fused, g_t=g_t)
+
         if p_t is None:
             B = x_t.shape[0]
             p_emb = torch.zeros((B, self.cfg.p_dim), device=x_t.device, dtype=x_t.dtype)
