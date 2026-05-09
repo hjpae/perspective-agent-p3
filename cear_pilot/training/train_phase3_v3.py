@@ -1,48 +1,45 @@
 # cear_pilot/training/train_phase3.py
 # -*- coding: utf-8 -*-
 """
-Phase 3 training: minimal embodiment.
+Phase 3 training: minimal embodiment with body-coupled perspective.
 
-Differences from Phase 2:
-  - Env: NZonePhase3Env (15x15, body state, vertical valence affordance,
-         self-cell as Position 2 — self-cell ch1 = current cell affordance).
-  - obs_dim = 18 (vs phase 2's 8).
-  - State head has separate body-prediction head (state.body_dim = 1).
-  - World latent receives body PE as separate AlphaNet channel
-    (world.body_err_dim = 1).
-  - Loss = obs prediction error + body prediction error + actor objective
-           (AAAI-style REINFORCE with PE as internal cost).
-  - Trained from scratch (phase 1/2 obs-incompatible).
+Current Phase 3 commitments:
+  - Env: NZonePhase3Env (15x15) with orthogonal horizontal perceptual
+    challenge and vertical affordance/viability gradient.
+  - Observation is pure exteroception: obs_dim=8 surrounding env samples.
+    Affordance is not visually observed.
+  - Body state is a separate interoceptive input. The env maintains an
+    internal latent viability potential u_t; the agent only receives the
+    bounded body_t = sigmoid(u_t).
+  - Encoder forms z_fused = z_obs(16) ⊕ z_body(4). Perspective g gates or
+    metricizes this fused exteroceptive–interoceptive representation.
+  - ObsDecoder predicts action-conditioned next observation D_x(z_t,g_t,a).
+  - BodyDecoder predicts action-conditioned interoceptive anticipation:
+      b̂_{t+1}^{(a)}  : next bounded body state
+      τ̂_t^{(a)}      : short-horizon latent viability tendency Δu
+    Neither BodyDecoder output is routed into policy logits.
+  - State body_head is retained only as an auxiliary interoceptive
+    registration / continuity anchor.
+  - Actor objective is separate from perspective formation. Actor logits are
+    computed from detached s_t and detached scalar body_t. Actor cost uses
+    visual prediction cost plus linear body drive:
+      c_t = obs_cost(a_t) + λ_body · (1 - body_{t+1})
 
-Body PE flow:
-  At step t, agent has body_pred(t-1) stored from previous forward.
-  body_actual_t is read from env info (after env.step).
-  body_pe_t = body_actual_t - body_pred(t-1)
-  This body_pe is fed to AlphaNet so plasticity reacts to body surprisal.
-  body_pred(t) is then computed by state head and stored for next step.
+Loss decomposition:
+  L_obs       = MSE(Σ_a stopgrad(π_a) D_x(z,g,a), x_{t+1})
+  L_body_next = MSE(D_body_next(z,g,b,a_t), b_{t+1})
+  L_trend     = MSE(D_body_trend(z,g,b,a_t), Δu_t^{(a_t,k)})
+  L_body_aux  = MSE(state_body_head, b_{t+1})
+  L_actor     = REINFORCE over detached policy state
+  L_smooth    = MSE(g_t, stopgrad(g_{t-1}))
+  L_total     = L_obs + body_loss_weight·(L_body_next
+                + body_trend_weight·L_trend
+                + body_aux_weight·L_body_aux)
+                + w_actor·L_actor + w_smooth·L_smooth + w_ent·L_ent
 
-Loss:
-  L_obs    = MSE(decoder(g_t, a_t), obs_{t+1})        — phase 2 style
-  L_body   = MSE(body_pred_t, body_actual_{t+1})       — phase 3 specific
-  L_actor  = -(c_t - b_t) * log π(a_t | s_t)           — AAAI/phase 1 style
-             where c_t = MSE(decoder(g_t, a_t), obs_{t+1}) is action-
-             conditioned prediction error. Stop-gradient at policy state
-             ensures actor objective doesn't flow into perspective layer.
-  L_smooth = MSE(g_t, stopgrad(g_{t-1}))               — slow latent regularizer
-  L_ent    = -H(π(·|s_t))                              — entropy bonus
-  L_total  = L_obs + body_loss_weight * L_body
-            + w_actor * L_actor + w_smooth * L_smooth + w_ent * L_ent
-
-The actor objective is disabled during a warm-up phase (warmup_episodes
-episodes), during which only L_obs + L_body train the world model and
-body head. This follows AAAI/phase 1's commitment that the perspective
-formation cycle and policy optimization cycle remain separable: backbone
-must reach predictive stability before policy learning is introduced.
-
-The body_loss_weight is a *training-time* hyperparameter (gradient scaling),
-not a value-function weight. It only controls how strongly the body head is
-trained, not the agent's runtime behavior. Body PE in AlphaNet has no such
-weight — AlphaNet learns the weighting itself.
+The key phenomenological separation is that body signals train a generative /
+perspectival interoceptive field, while action selection only receives the
+body scalar and the detached perspective-organized state.
 """
 
 from __future__ import annotations
@@ -299,6 +296,7 @@ def train(args):
         metabolic_cost=args.metabolic_cost,
         movement_cost=args.movement_cost,
         affordance_to_body_gain=args.affordance_gain,
+        body_u_decay=args.body_u_decay,
         silhouette_dim=int(args.silhouette_dim),
         silhouette_noise_sigma=float(args.silhouette_sigma),
     )
@@ -441,6 +439,19 @@ def train(args):
             )
             a_int = int(action.item())
 
+            # Compute counterfactual body tendency target BEFORE env.step,
+            # using the agent's pre-step (x, y, body_u) state. This is
+            # the env-internal target for BodyDecoder's tendency head.
+            # Tendency = Δu over `body_tendency_horizon` steps under
+            # repeated action a_int. Computed in latent viability space
+            # u (NOT clipped body) so directional gradient survives at
+            # body extremes.
+            body_tendency_target = float(
+                env.counterfactual_body_tendency(
+                    a_int, horizon=int(args.body_tendency_horizon),
+                )
+            )
+
             obs_next, _, terminated, truncated, info_next = env.step(a_int)
             x_next = torch.tensor(obs_next, dtype=torch.float32, device=device).unsqueeze(0)
             a_oh = F.one_hot(torch.tensor([a_int], device=device),
@@ -480,18 +491,37 @@ def train(args):
             body_loss_state_aux = F.mse_loss(body_pred_state, body_actual_next)
 
             if body_decoder is not None:
-                # action-conditioned anticipation: predict for each action,
-                # take the executed action's prediction. body_actual_t is
-                # the current body state (initial condition for transition).
-                body_pred_all = body_decoder.predict_all_actions(
+                # Action-conditioned anticipation + viability tendency.
+                # body_actual_t is current body (initial condition).
+                # Two heads:
+                #   body_pred_all (1, A, 1)    — next-step body in [0,1]
+                #   tendency_all  (1, A, 1)    — Δu over k steps, real-valued
+                body_pred_all, tendency_all = body_decoder.predict_all_actions(
                     out["z"], out["g"], body_actual_t,
-                )  # (1, A, body_dim)
-                body_pred_action = body_pred_all[0, a_int].unsqueeze(0)  # (1,1)
+                )
+                body_pred_action = body_pred_all[0, a_int].unsqueeze(0)   # (1,1)
+                tendency_action = tendency_all[0, a_int].unsqueeze(0)     # (1,1)
+
                 body_loss_action = F.mse_loss(body_pred_action, body_actual_next)
-                body_loss = (body_loss_action
-                             + args.body_aux_weight * body_loss_state_aux)
+
+                # Tendency loss: target is env-computed Δu under repeated
+                # action a_int over k steps. Targets are real-valued.
+                tendency_target_t = torch.tensor(
+                    [[body_tendency_target]],
+                    dtype=torch.float32, device=device,
+                )
+                body_loss_tendency = F.mse_loss(tendency_action, tendency_target_t)
+
+                body_loss = (
+                    body_loss_action
+                    + args.body_trend_weight * body_loss_tendency
+                    + args.body_aux_weight * body_loss_state_aux
+                )
             else:
                 body_loss = body_loss_state_aux
+                body_pred_action = None
+                tendency_action = None
+                body_loss_tendency = None
 
             # ─── Smoothness loss on g (slow latent regularizer) ───
             smooth_loss = F.mse_loss(out["g"], g_prev.detach())
@@ -502,17 +532,11 @@ def train(args):
             #   body_drive = 1 - body_actual_next         — survival drive
             # cost_t = obs_cost + λ_body · body_drive
             #
-            # Body PE (squared) is intentionally NOT in the actor cost.
-            # Architectural commitment: prediction error of body is
-            # already handled by:
-            #   - body PE → AlphaNet (plasticity rate driver)
-            #   - body PE → g GRU update content (commitment III:
-            #              interoceptive PE constitutive of perspective)
-            #   - body PE squared → body_loss (state head's body_head learns
-            #              to predict body)
-            # So actor cost carries the *drive* (survival imperative —
-            # body higher = lower cost), while perspective formation and
-            # body prediction handle the *predictive* aspects.
+            # Body prediction errors / tendency errors are intentionally
+            # NOT in the actor cost. They train the generative/perspectival
+            # pathway (state registration + action-conditioned interoceptive
+            # anticipation). Actor cost carries only the immediate drive
+            # signal: body higher = lower cost.
             #
             # Linear gradient (not deviation²) avoids saturation-driven
             # local minima at body=0 (where squared-PE attractor would
@@ -580,7 +604,13 @@ def train(args):
                 ))
 
             obs_pe_val = float(obs_loss.item())
-            body_pe_val = float(body_loss.item())
+            # Keep body_pe as next-body prediction PE for backward-compatible
+            # diagnostics. Store composite body_loss and components separately.
+            body_pe_val = float(body_loss_action.item()) if body_decoder is not None else float(body_loss_state_aux.item())
+            body_loss_val = float(body_loss.item())
+            body_loss_action_val = float(body_loss_action.item()) if body_decoder is not None else float("nan")
+            body_loss_tendency_val = float(body_loss_tendency.item()) if body_decoder is not None else float("nan")
+            body_loss_state_aux_val = float(body_loss_state_aux.item())
             pe_ema_s = 0.1 * obs_pe_val + 0.9 * pe_ema_s
             pe_ema_l = 0.01 * obs_pe_val + 0.99 * pe_ema_l
             pe_prev = obs_pe_val
@@ -628,14 +658,25 @@ def train(args):
                     "action": a_int,
                     "obs_pe": obs_pe_val,
                     "body_pe": body_pe_val,
+                    "body_loss": body_loss_val,
+                    "body_loss_action": body_loss_action_val,
+                    "body_loss_tendency": body_loss_tendency_val,
+                    "body_loss_state_aux": body_loss_state_aux_val,
                     "alpha": float(out["alpha"].item()),
                     "g_norm": float(np.linalg.norm(g_np)),
                     "body_state": float(info["body_state"]),
+                    "body_u": float(info.get("body_u", 0.0)),
+                    "body_raw_delta": float(info.get("body_raw_delta", 0.0)),
                     "body_pred": float(body_pred_state.detach().item()),
                     "body_pred_action": (
                         float(body_pred_action.detach().item())
                         if body_decoder is not None else float("nan")
                     ),
+                    "tendency_pred": (
+                        float(tendency_action.detach().item())
+                        if body_decoder is not None else float("nan")
+                    ),
+                    "tendency_target": float(body_tendency_target),
                     "affordance_here": float(info.get("affordance_here", 0.0)),
                     "perturbation_active": int(info.get("perturbation_active", 0)),
                     "perturbation_trace": float(info.get("perturbation_trace", 0.0)),
@@ -784,15 +825,25 @@ def parse_args():
                          "cost_t = obs_PE² + λ · (1 - body_actual_next).")
 
     # ── Body loss decomposition ──
-    # Total body loss = L_action (BodyDecoder, main) + α · L_state_aux
-    # (state head body_head registration). α is body_aux_weight.
-    # 0.0 = state body_head only learns from g/state-head gradient via
-    # other losses. 0.1 = small auxiliary weight to keep registration
-    # head trained alongside the main anticipation head.
+    # Total body loss = L_action (BodyDecoder next-body, main)
+    #                 + λ_trend · L_tendency (BodyDecoder Δu, tendency)
+    #                 + α · L_state_aux (state body_head registration)
+    # Tendency target is env-computed Δu over body_tendency_horizon steps
+    # under repeated executed action, in latent viability space u.
+    # This is what restores directional gradient at body extremes (the
+    # bottom dead-zone fix): one-step Δbody is flat at body=0, but Δu
+    # is not.
     ap.add_argument("--body_aux_weight", type=float, default=0.1,
                     help="Auxiliary weight on state body_head loss "
                          "(registration anchor) when BodyDecoder is the "
                          "main body anticipation path.")
+    ap.add_argument("--body_trend_weight", type=float, default=0.5,
+                    help="Weight on BodyDecoder tendency-head loss. "
+                         "0 disables tendency learning.")
+    ap.add_argument("--body_tendency_horizon", type=int, default=5,
+                    help="Horizon (in steps) over which to compute "
+                         "counterfactual body-tendency target Δu under "
+                         "repeated executed action.")
 
     # ── Phase 3 body PE routing (asymmetric channels) ──
     # body_err_t (1-d signed) can route to TWO independent destinations:
@@ -880,6 +931,9 @@ def parse_args():
     ap.add_argument("--metabolic_cost", type=float, default=0.01)
     ap.add_argument("--movement_cost", type=float, default=0.01)
     ap.add_argument("--affordance_gain", type=float, default=0.10)
+    ap.add_argument("--body_u_decay", type=float, default=0.995,
+                    help="Decay rho for latent viability potential u_t. "
+                         "body_t = sigmoid(u_t); lower values prevent long-run drift.")
 
     # Body loss weight (training scaling, not runtime preference)
     ap.add_argument("--body_loss_weight", type=float, default=1.0)

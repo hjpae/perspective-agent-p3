@@ -19,14 +19,16 @@ What is new:
      interoceptive channel (body input to BodyEncoder + policy).
 
 2. Body state (interoceptive, separate from obs)
-   A minimal scalar (energy, in [body_min, body_max]) carried by the agent.
-   It evolves each step via:
-       body <- body  - metabolic_cost
-                     - movement_cost (if moved)
-                     + affordance_at_current_cell * affordance_to_body_gain
+   The environment maintains an internal latent viability potential u_t.
+   The agent only receives the bounded body state body_t = sigmoid(u_t).
+   u_t evolves each step via:
+       u <- body_u_decay * u
+            - metabolic_cost
+            - movement_cost (if moved)
+            + affordance_at_current_cell * affordance_to_body_gain
    This makes affordance an interoceptive feature: it is felt only
-   through its effect on body. The agent must explore (act) and feel
-   the body change to learn the affordance structure of the environment.
+   through its effect on body, while the latent potential preserves
+   directional gradients near body extremes.
 
 3. Grid layout (15 x 15 with orthogonal gradients)
    - Horizontal axis: perception challenge (sigma gradient, linear).
@@ -67,6 +69,23 @@ except Exception as e:
     raise ImportError("gymnasium required") from e
 
 from cear_pilot.envs.nzone_phase2 import NZonePhase2Config, NZonePhase2Env
+
+
+# ---------------------------------------------------------------------------
+# Soft viability potential helpers
+# ---------------------------------------------------------------------------
+# body_u is the unbounded latent viability potential maintained by env.
+# body_state = sigmoid(body_u) is the bounded observable felt by agent.
+# Phase 3 commitment: agent receives only body_state (bounded). body_u
+# preserves directional gradient at extremes (bottom dead zone fix).
+
+def _sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + float(np.exp(-x)))
+
+
+def _logit(p: float, eps: float = 1e-6) -> float:
+    p = float(np.clip(p, eps, 1.0 - eps))
+    return float(np.log(p / (1.0 - p)))
 
 
 # ---------------------------------------------------------------------------
@@ -136,25 +155,30 @@ class NZonePhase3Config(NZonePhase2Config):
     body_init: float = 0.5
     body_min: float = 0.0
     body_max: float = 1.0
-    # Body dynamics magnitudes — calibrated for SMOOTH body dynamics.
+    # Body dynamics — soft viability potential.
     #
     # Iteration history:
     #   Apr 2026 (minimal):      metabolic=0.002, movement=0.002, gain=0.02
-    #     → step-wise body change ~0.01, body PE ~1e-4. Too small to be a
-    #       meaningful learning signal for body-coupled architecture.
+    #     → too small to be meaningful learning signal.
     #   May 2026 (amplified ×5): metabolic=0.01,  movement=0.01,  gain=0.10
-    #     → step-wise change ~0.05, body PE 1e-3 to 1e-2. Magnitudes
-    #       substantial, but body saturates to 0 or 1 within ~10 steps and
-    #       stays clipped → bang-bang switch dynamics, ~76% saturation
-    #       fraction. Body becomes a binary signal, not a smooth viability
-    #       state.
-    #   May 2026 (smooth):       metabolic=0.003, movement=0.003, gain=0.04
-    #     → step-wise change ~0.02 max, body PE ~1e-3. Body ranges
-    #       meaningfully in [0, 1] over 200-step episode, saturates only
-    #       under sustained one-way trajectories. Smooth viability signal.
-    metabolic_cost: float = 0.003
-    movement_cost: float = 0.003
-    affordance_to_body_gain: float = 0.04
+    #     → bang-bang saturation ~76%; body became binary switch.
+    #   May 2026 (smooth clip):  metabolic=0.003, movement=0.003, gain=0.04
+    #     → smoother but bottom DEAD ZONE: at body=0 (clipped), all
+    #       directional gradient collapses; one-step Δbody indistinguishable
+    #       between UP/DOWN. BodyDecoder learns flat field at bottom.
+    #   May 2026 (soft potential): latent viability potential u_t with
+    #     squashed observable body_t = sigmoid(u_t). u_t is environment-
+    #     internal (NOT input to agent). Body remains bounded in [0,1] but
+    #     directional gradient survives extremes — bottom is no longer dead.
+    metabolic_cost: float = 0.002
+    movement_cost: float = 0.001
+    affordance_to_body_gain: float = 0.05
+
+    # Soft viability potential: body_t = sigmoid(body_u).
+    # body_u is unbounded latent state, body_t is bounded observable.
+    # body_u_decay < 1 prevents unbounded drift over very long horizons
+    # while preserving local directional gradient even when body_t≈0/1.
+    body_u_decay: float = 0.995
 
     # ----- body silhouette (optional, toggleable) -----
     # When silhouette_dim > 0, the env produces a body_silhouette feature
@@ -186,8 +210,14 @@ class NZonePhase3Env(NZonePhase2Env):
         cfg = config or NZonePhase3Config()
         super().__init__(config=cfg, render_mode=render_mode)
 
-        # Phase 3 specific state
-        self.body_state: np.ndarray = np.array([cfg.body_init], dtype=np.float32)
+        # Phase 3 specific state.
+        # body_u: latent viability potential (unbounded, env-internal).
+        # body_state: observable body = sigmoid(body_u), in [0,1].
+        # Agent receives body_state only; body_u is never fed to agent.
+        self.body_u: float = float(_logit(cfg.body_init))
+        self.body_state: np.ndarray = np.array(
+            [_sigmoid(self.body_u)], dtype=np.float32
+        )
 
         # Static affordance map indexed by (y, x): vertical sigmoid gradient
         self._affordance_map: np.ndarray = self._build_affordance_map()
@@ -195,6 +225,8 @@ class NZonePhase3Env(NZonePhase2Env):
         # Step-level diagnostics
         self._last_metabolic_delta: float = 0.0
         self._last_affordance_gain: float = 0.0
+        self._last_body_raw_delta: float = 0.0
+        self._last_body_u: float = float(self.body_u)
 
     # ----- typed accessor -----
 
@@ -336,13 +368,19 @@ class NZonePhase3Env(NZonePhase2Env):
         affordance = float(self._affordance_map[self.y, self.x])
         affordance_gain = affordance * cfg.affordance_to_body_gain
 
-        delta = metabolic_delta + affordance_gain
-        new_body = float(self.body_state[0]) + delta
-        new_body = float(np.clip(new_body, cfg.body_min, cfg.body_max))
+        raw_delta = metabolic_delta + affordance_gain
 
-        self.body_state = np.array([new_body], dtype=np.float32)
+        # Soft viability potential update: u_{t+1} = ρ u_t + raw_delta
+        # body_t = sigmoid(u_t), bounded in [0,1] but with directional
+        # gradient preserved even at extremes.
+        self.body_u = float(cfg.body_u_decay) * self.body_u + raw_delta
+        body = float(_sigmoid(self.body_u))
+
+        self.body_state = np.array([body], dtype=np.float32)
         self._last_metabolic_delta = float(metabolic_delta)
         self._last_affordance_gain = float(affordance_gain)
+        self._last_body_raw_delta = float(raw_delta)
+        self._last_body_u = float(self.body_u)
 
     # ----- reset -----
 
@@ -353,9 +391,12 @@ class NZonePhase3Env(NZonePhase2Env):
         options: Optional[Dict] = None,
     ):
         _, _ = super().reset(seed=seed, options=options)
-        self.body_state = np.array([self.cfg3.body_init], dtype=np.float32)
+        self.body_u = float(_logit(self.cfg3.body_init))
+        self.body_state = np.array([_sigmoid(self.body_u)], dtype=np.float32)
         self._last_metabolic_delta = 0.0
         self._last_affordance_gain = 0.0
+        self._last_body_raw_delta = 0.0
+        self._last_body_u = float(self.body_u)
         obs = self._observe()
         info = self._info_dict()
         return obs, info
@@ -390,6 +431,8 @@ class NZonePhase3Env(NZonePhase2Env):
     def _info_dict(self) -> Dict[str, Any]:
         info = super()._info_dict()
         info["body_state"] = float(self.body_state[0])
+        info["body_u"] = float(self._last_body_u)
+        info["body_raw_delta"] = float(self._last_body_raw_delta)
         info["affordance_here"] = float(self._affordance_map[self.y, self.x])
         info["valence_zone_id"] = int(self.valence_zone_id(self.y))
         info["metabolic_delta"] = float(self._last_metabolic_delta)
@@ -398,6 +441,53 @@ class NZonePhase3Env(NZonePhase2Env):
         if sil is not None:
             info["body_silhouette"] = sil
         return info
+
+    # ----- counterfactual viability tendency -----
+
+    def counterfactual_body_tendency(
+        self,
+        action: int,
+        horizon: int = 5,
+    ) -> float:
+        """Predict the latent viability tendency if `action` is repeated
+        for `horizon` steps from the current (x, y, body_u) state.
+
+        Returns Δu = u_{t+horizon} - u_t under repeated action a.
+
+        This is the env-internal target for BodyDecoder's tendency head.
+        Phase 3 commitment: tendency target is computed in latent
+        viability space u (NOT clipped body), so directional gradient
+        survives at body extremes — bottom is no longer a flat field.
+
+        IMPORTANT: must be called BEFORE env.step(a) so that current
+        (x, y, body_u) reflect the pre-step state. Pure simulation;
+        does not mutate env state.
+        """
+        cfg = self.cfg3
+        x, y = int(self.x), int(self.y)
+        u = float(self.body_u)
+        u0 = u
+
+        for _ in range(int(horizon)):
+            dx, dy = 0, 0
+            if action == self.ACTION_UP:    dy = -1
+            elif action == self.ACTION_DOWN:  dy = 1
+            elif action == self.ACTION_LEFT:  dx = -1
+            elif action == self.ACTION_RIGHT: dx = 1
+            x, y = self._clip_xy(x + dx, y + dy)
+            moved = (action != self.ACTION_STAY)
+
+            metabolic_delta = -cfg.metabolic_cost
+            if moved:
+                metabolic_delta -= cfg.movement_cost
+
+            affordance = float(self._affordance_map[y, x])
+            affordance_gain = affordance * cfg.affordance_to_body_gain
+            raw_delta = metabolic_delta + affordance_gain
+
+            u = float(cfg.body_u_decay) * u + raw_delta
+
+        return float(u - u0)
 
 
 def make_env(**kwargs) -> NZonePhase3Env:
@@ -411,7 +501,7 @@ def make_env(**kwargs) -> NZonePhase3Env:
 if __name__ == "__main__":
     env = make_env()
     obs, info = env.reset(seed=0)
-    print(f"obs shape: {obs.shape}  (expected (16,) — 8 surrounding cells × 2 channels)")
+    print(f"obs shape: {obs.shape}  (expected (8,) — 8 surrounding cells × env_sample)")
     print(f"observation_space: {env.observation_space}")
     print(f"grid: {env.W} x {env.H}, start: ({env.x}, {env.y})")
     print(f"initial body_state: {info['body_state']:.4f}  (interoceptive, separate from obs)")

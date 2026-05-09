@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -20,32 +21,37 @@ class BodyDecoderConfig:
 
 class BodyDecoder(nn.Module):
     """Action-conditioned body prediction — counterfactual interoceptive
-    anticipation.
+    anticipation, with two heads:
 
-    For each candidate action a, predict the body state at t+1 under
-    that action:
-
-        b̂_{t+1}^{(a)} = D_body(z_t, g_t, b_t, a)
+      b̂_{t+1}^{(a)}  : next-step body prediction (bounded, sigmoid)
+      τ̂_t^{(a)}     : short-horizon viability tendency (real-valued)
 
     Phase 3 phenomenological commitment:
-      - This is NOT a policy feature. b̂^{(a)} is never routed into
-        policy logits.
-      - This trains an interoceptive *anticipation* model: the agent
-        learns "what bodily consequence does this action open" without
-        affordance becoming a direct action knob.
-      - Its loss flows back through z (encoder including BodyEncoder)
-        and g (perspective). This is how g learns to organize a
-        qualitative field of bodily viability — affordance enters as
-        anticipated bodily consequence, not as policy preference.
+      - NOT a policy feature. Both outputs are never routed into policy
+        logits. Affordance does not become an action knob.
+      - Trains interoceptive *anticipation* and *tendency* models. The
+        agent learns "what bodily consequence does this action open" and
+        "what direction does my viability move under this action".
+      - Loss flows back through z (encoder including BodyEncoder) and g
+        (perspective). This is how g organizes a qualitative field of
+        bodily viability around action consequences.
+
+    Why two heads:
+      Next-step body alone is flat at body extremes (clipped or sigmoid-
+      saturated): UP and DOWN look near-identical at body≈0. Tendency
+      target — Δu over k steps in latent viability space — preserves
+      directional gradient even at extremes. Tendency captures "this
+      direction recovers / further depletes" where one-step body cannot.
 
     Conceptual separation from state head's body_head:
       - state body_head: interoceptive *registration* / continuity
                          anchor. "How does my current body state
                          continue?" Stabilizes body_pred_prev across
                          carried g.
-      - BodyDecoder:     counterfactual interoceptive *anticipation*.
-                         "What body opens with this action?" Trains
-                         the perspectival field around bodily viability.
+      - BodyDecoder:     counterfactual interoceptive *anticipation* +
+                         viability *tendency*. "What body opens / what
+                         direction does viability move under this
+                         action?"
 
     Both serve the generative/perspectival pathway; neither feeds policy.
     """
@@ -55,6 +61,9 @@ class BodyDecoder(nn.Module):
         self.cfg = cfg
         in_dim = cfg.z_dim + cfg.g_dim + cfg.body_dim + cfg.n_actions
         self.g_ln = nn.LayerNorm(cfg.g_dim)
+        # Output dim = body_dim (next body) + body_dim (tendency).
+        # body_dim=1 → 2-d output: [body_next_logit, tendency_real].
+        self.out_dim = 2 * cfg.body_dim
         self.net = nn.Sequential(
             nn.Linear(in_dim, cfg.hidden),
             nn.Tanh(),
@@ -62,8 +71,20 @@ class BodyDecoder(nn.Module):
             nn.Linear(cfg.hidden, cfg.hidden),
             nn.Tanh(),
             nn.Dropout(cfg.dropout),
-            nn.Linear(cfg.hidden, cfg.body_dim),
+            nn.Linear(cfg.hidden, self.out_dim),
         )
+
+    def _split_outputs(
+        self, raw: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """raw: (..., 2*body_dim) -> (body_next, tendency).
+        body_next is sigmoid-squashed to [0, 1].
+        tendency is left real-valued (target is Δu, unbounded).
+        """
+        D = self.cfg.body_dim
+        body_next = torch.sigmoid(raw[..., :D])
+        tendency = raw[..., D:]
+        return body_next, tendency
 
     def forward(
         self,
@@ -71,23 +92,21 @@ class BodyDecoder(nn.Module):
         g_t: torch.Tensor,
         body_t: torch.Tensor,
         a_onehot: torch.Tensor,
-    ) -> torch.Tensor:
-        """Predict b̂_{t+1} under the given action onehot.
-        Output passed through sigmoid → in [0, 1] consistent with body
-        state range.
-        """
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Predict (b̂_{t+1}, τ̂_t) under the given action onehot."""
         g = self.g_ln(g_t)
         x = torch.cat([z_t, g, body_t, a_onehot], dim=-1)
-        return torch.sigmoid(self.net(x))
+        raw = self.net(x)
+        return self._split_outputs(raw)
 
     def predict_all_actions(
         self,
         z_t: torch.Tensor,
         g_t: torch.Tensor,
         body_t: torch.Tensor,
-    ) -> torch.Tensor:
-        """Predict b̂_{t+1}^{(a)} for every candidate action.
-        Returns (B, n_actions, body_dim).
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Predict (b̂_{t+1}^{(a)}, τ̂_t^{(a)}) for every candidate action.
+        Returns (body_next_all (B, A, D), tendency_all (B, A, D)).
         """
         B = g_t.shape[0]
         A = self.cfg.n_actions
@@ -101,5 +120,5 @@ class BodyDecoder(nn.Module):
         b_rep = body_t.unsqueeze(1).repeat(1, A, 1)
 
         x = torch.cat([z_rep, g_rep, b_rep, eye], dim=-1)
-        out = self.net(x.view(B * A, -1)).view(B, A, -1)
-        return torch.sigmoid(out)
+        raw = self.net(x.view(B * A, -1)).view(B, A, self.out_dim)
+        return self._split_outputs(raw)
