@@ -1,0 +1,34 @@
+# condition=full seed=3
+# start_time=2026-05-09T05:53:06+00:00
+# command: python -m cear_pilot.training.train_phase3_v3_conative --episodes 180 --warmup_episodes 30 --max_steps 200 --save_traj --device cuda --gating_mode metric_c1 --silhouette_dim 4 --silhouette_sigma 0.10 --g_carry_decay 0.99 --lambda_body 0.10 --entropy_target_ratio 0.70 --w_entropy_min 0.005 --metabolic_cost 0.002 --movement_cost 0.001 --affordance_gain 0.05 --body_trend_weight 0.5 --body_tendency_horizon 5 --conative_temperature 0.10 --conative_trend_weight 1.0 --conative_body_weight 0.25 --print_every 10 --seed 3 --outdir outputs/p3_v3_cohorts/full/s3 --w_conative 0.1 
+
+[build] Agent params: 87241
+[build] Decoder params: 7136
+[build] BodyDecoder params: 6810
+[build] z_fused=20 (z_obs=16 + z_body=4), body_dim=1
+[build] body-coupled: encoder=True policy=True state=True
+[build] body_in_g=True (scale=20.0)  body_err_in_alpha=False  obs_dim=8
+[build] g_carry_decay=0.99  (1.0=full carry, 0.0=full reset)
+[build] silhouette_dim=4 (σ=0.1)
+[train] adaptive entropy: init=0.0100 target=1.1266 (=70% of max) bounds=[0.005, 0.05]
+[train] warmup=30 episodes (6000 steps), total=180 episodes
+[ep   10/180] [warmup] obs_PE=0.0280 body_PE=0.0011 ||g||=3.452 α=0.102 body=0.796 | xy=(10.9,7.8) zones[BR=0.30 MR=0.25] UDLRS=0.18/0.18/0.18/0.27/0.19 H=1.599 wH=0.0100 adv=+0.026 c̄=0.0899 (39s)
+[ep   20/180] [warmup] obs_PE=0.0117 body_PE=0.0015 ||g||=3.473 α=0.198 body=0.724 | xy=(11.1,8.0) zones[BR=0.35 MR=0.22] UDLRS=0.17/0.18/0.19/0.27/0.20 H=1.599 wH=0.0100 adv=+0.087 c̄=0.0853 (82s)
+[ep   30/180] [warmup] obs_PE=0.0241 body_PE=0.0005 ||g||=3.497 α=0.263 body=0.346 | xy=(9.4,6.8) zones[MM=0.23 MR=0.22] UDLRS=0.17/0.18/0.21/0.25/0.20 H=1.598 wH=0.0100 adv=-0.035 c̄=0.0939 (124s)
+[ep   40/180] [actor ] obs_PE=0.0365 body_PE=0.0001 ||g||=3.509 α=0.061 body=0.891 | xy=(12.2,2.7) zones[TR=0.67 MR=0.17] UDLRS=0.21/0.12/0.14/0.36/0.16 H=1.531 wH=0.0050 adv=+0.156 c̄=0.0501 (165s)
+[ep   50/180] [actor ] obs_PE=0.0131 body_PE=0.0003 ||g||=3.517 α=0.036 body=0.811 | xy=(12.2,3.4) zones[TR=0.63 MR=0.16] UDLRS=0.28/0.18/0.12/0.25/0.18 H=1.539 wH=0.0050 adv=+0.115 c̄=0.0549 (201s)
+[ep   60/180] [actor ] obs_PE=0.0101 body_PE=0.0002 ||g||=3.516 α=0.047 body=0.661 | xy=(11.6,2.8) zones[TR=0.62 MR=0.17] UDLRS=0.24/0.14/0.14/0.26/0.21 H=1.471 wH=0.0050 adv=+0.035 c̄=0.0555 (241s)
+[ep   70/180] [actor ] obs_PE=0.0245 body_PE=0.0001 ||g||=3.513 α=0.048 body=0.732 | xy=(12.5,2.7) zones[TR=0.67 MR=0.19] UDLRS=0.24/0.12/0.12/0.29/0.23 H=1.562 wH=0.0050 adv=+0.124 c̄=0.0473 (281s)
+[ep   80/180] [actor ] obs_PE=0.0219 body_PE=0.0002 ||g||=3.526 α=0.047 body=0.884 | xy=(11.7,3.0) zones[TR=0.63 MR=0.15] UDLRS=0.21/0.12/0.15/0.30/0.22 H=1.402 wH=0.0050 adv=+0.098 c̄=0.0571 (320s)
+[ep   90/180] [actor ] obs_PE=0.0127 body_PE=0.0001 ||g||=3.526 α=0.053 body=0.892 | xy=(12.3,2.2) zones[TR=0.74 MR=0.08] UDLRS=0.26/0.10/0.11/0.27/0.26 H=1.539 wH=0.0050 adv=+0.127 c̄=0.0475 (360s)
+[ep  100/180] [actor ] obs_PE=0.0242 body_PE=0.0003 ||g||=3.549 α=0.046 body=0.848 | xy=(10.4,3.3) zones[TR=0.55 MM=0.15] UDLRS=0.22/0.13/0.16/0.24/0.25 H=1.556 wH=0.0050 adv=+0.060 c̄=0.0661 (400s)
+[ep  110/180] [actor ] obs_PE=0.0112 body_PE=0.0001 ||g||=3.543 α=0.096 body=0.910 | xy=(12.3,2.6) zones[TR=0.74 MR=0.12] UDLRS=0.27/0.14/0.12/0.26/0.21 H=1.555 wH=0.0050 adv=+0.099 c̄=0.0501 (441s)
+[ep  120/180] [actor ] obs_PE=0.0113 body_PE=0.0000 ||g||=3.554 α=0.048 body=0.914 | xy=(12.0,2.9) zones[TR=0.67 MR=0.15] UDLRS=0.27/0.13/0.14/0.27/0.20 H=1.525 wH=0.0050 adv=+0.104 c̄=0.0536 (485s)
+[ep  130/180] [actor ] obs_PE=0.0194 body_PE=0.0001 ||g||=3.550 α=0.036 body=0.911 | xy=(11.8,2.4) zones[TR=0.71 TM=0.07] UDLRS=0.29/0.12/0.12/0.25/0.21 H=1.569 wH=0.0050 adv=+0.099 c̄=0.0530 (530s)
+[ep  140/180] [actor ] obs_PE=0.0547 body_PE=0.0001 ||g||=3.549 α=0.049 body=0.711 | xy=(11.9,3.5) zones[TR=0.62 MR=0.16] UDLRS=0.24/0.14/0.12/0.27/0.23 H=1.590 wH=0.0050 adv=+0.100 c̄=0.0600 (570s)
+[ep  150/180] [actor ] obs_PE=0.0269 body_PE=0.0002 ||g||=3.559 α=0.043 body=0.736 | xy=(12.1,3.5) zones[TR=0.67 MR=0.10] UDLRS=0.24/0.14/0.14/0.30/0.18 H=1.492 wH=0.0050 adv=+0.131 c̄=0.0597 (610s)
+[ep  160/180] [actor ] obs_PE=0.0160 body_PE=0.0001 ||g||=3.542 α=0.041 body=0.905 | xy=(11.8,2.9) zones[TR=0.69 MM=0.11] UDLRS=0.25/0.11/0.12/0.29/0.23 H=1.509 wH=0.0050 adv=+0.150 c̄=0.0576 (650s)
+[ep  170/180] [actor ] obs_PE=0.0143 body_PE=0.0004 ||g||=3.516 α=0.038 body=0.867 | xy=(12.1,2.9) zones[TR=0.67 MR=0.14] UDLRS=0.30/0.15/0.11/0.24/0.20 H=1.553 wH=0.0050 adv=+0.087 c̄=0.0548 (687s)
+[ep  180/180] [actor ] obs_PE=0.0141 body_PE=0.0001 ||g||=3.504 α=0.038 body=0.845 | xy=(11.1,2.7) zones[TR=0.66 MM=0.10] UDLRS=0.29/0.16/0.13/0.25/0.17 H=1.548 wH=0.0050 adv=+0.092 c̄=0.0595 (721s)
+[save] outputs/p3_v3_cohorts/full/s3/traj.parquet (36000 rows)
+[save] outputs/p3_v3_cohorts/full/s3/ckpt_final.pt

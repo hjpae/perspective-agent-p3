@@ -1,0 +1,60 @@
+
+=== TRAJECTORY: body by valence zone ===
+                  n  body_state   body_u  body_delta  body_u_delta  body_drive  body_pe  trend_target
+valence_name                                                                                         
+top           12186     0.73666  1.12804     0.00241       0.01275     0.26334  0.00006       0.05929
+mid            3473     0.52391  0.11189    -0.00000      -0.00010     0.47609  0.00038       0.00198
+bottom          261     0.40401 -0.41854    -0.00406      -0.01824     0.59599  0.00010      -0.08083
+
+=== TRAJECTORY: realized body_delta by valence x action ===
+action_name      DOWN     LEFT    RIGHT     STAY       UP
+valence_name                                             
+top           0.00198  0.00246  0.00259  0.00258  0.00275
+mid          -0.00169 -0.00044 -0.00048 -0.00010  0.00089
+bottom       -0.00501 -0.00450 -0.00454 -0.00415 -0.00366
+
+=== TRAJECTORY: realized body_u_delta by valence x action ===
+action_name      DOWN     LEFT    RIGHT     STAY       UP
+valence_name                                             
+top           0.00996  0.01210  0.01252  0.01306  0.01361
+mid          -0.00742 -0.00194 -0.00206 -0.00042  0.00364
+bottom       -0.02119 -0.02045 -0.02006 -0.01793 -0.01616
+
+=== CONATIVE TARGET q(a) by valence zone ===
+                  n  conative_loss  q_entropy     q_UP   q_DOWN   q_LEFT  q_RIGHT   q_STAY
+valence_name                                                                              
+top           12258        0.05629    1.59304  0.23082  0.13624  0.20766  0.20765  0.21762
+mid            3480        0.05889    1.54067  0.32372  0.09690  0.18990  0.18873  0.20076
+bottom          262        0.04691    1.55242  0.32815  0.11859  0.18137  0.18129  0.19060
+[build] Agent params: 87241
+[build] Decoder params: 7136
+[build] BodyDecoder params: 6810
+[build] z_fused=20 (z_obs=16 + z_body=4), body_dim=1
+[build] body-coupled: encoder=True policy=True state=True
+[build] body_in_g=True (scale=20.0)  body_err_in_alpha=False  obs_dim=8
+[build] g_carry_decay=0.99  (1.0=full carry, 0.0=full reset)
+[build] silhouette_dim=4 (σ=0.1)
+
+=== BODYDECODER: next-body counterfactual summary by valence ===
+                n  body_state  pred_UP_minus_DOWN  true_UP_minus_DOWN
+valence_name                                                         
+top           541     0.70424             0.00372             0.00071
+mid           468     0.52937             0.01211             0.00248
+bottom        262     0.40508             0.00823             0.00118
+
+=== BODYDECODER: TENDENCY counterfactual summary by valence ===
+                n   body_u  pred_trend_UP_minus_DOWN  true_trend_UP_minus_DOWN  abs_err_trend_UP  abs_err_trend_DOWN
+valence_name                                                                                                        
+top           541  0.96982                   0.07273                   0.06001           0.01242             0.01668
+mid           468  0.13261                   0.13803                   0.13210           0.01907             0.01513
+bottom        262 -0.41396                   0.11725                   0.08038           0.04553             0.00867
+
+=== TENDENCY directional check ===
+Want pred_trend_UP_minus_DOWN > 0 and aligned with true_trend_UP_minus_DOWN.
+                 mean      std      min      max
+valence_name                                    
+top           0.07273  0.02258  0.03382  0.13903
+mid           0.13803  0.01390  0.06738  0.14964
+bottom        0.11725  0.01270  0.09817  0.14427
+
+Saved diagnostics to: outputs/p3_v3_cohorts/full/s13/diagnostics
