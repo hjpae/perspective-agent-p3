@@ -67,6 +67,7 @@ from cear_pilot.models.world_latent import WorldLatentConfig
 from cear_pilot.models.state_head import StateHeadConfig
 from cear_pilot.models.policy import PolicyConfig
 from cear_pilot.models.decoder import ObsDecoder, DecoderConfig
+from cear_pilot.models.body_decoder import BodyDecoder, BodyDecoderConfig
 
 
 def count_params(module: nn.Module, only_trainable=False):
@@ -203,7 +204,13 @@ def build_agent_and_decoder(args):
         use_metric=use_metric,
     )
 
-    # Policy receives body_state directly (Layer 1 willing).
+    # Policy receives only body_t scalar — NOT z_body. Routing the
+    # learned interoceptive representation z_body into policy logits
+    # would turn affordance into a direct action knob (functionalist
+    # body-informed control). Affordance enters action selection only
+    # indirectly, through the perspective-organized state s_t.
+    # Action-conditioned interoceptive anticipation is handled by the
+    # separate BodyDecoder, whose outputs also do not enter policy.
     policy_cfg = PolicyConfig(
         s_dim=state_cfg.s_dim,
         n_actions=5,
@@ -218,6 +225,7 @@ def build_agent_and_decoder(args):
     agent = CEARAgent(agent_cfg)
 
     dec_cfg = DecoderConfig(
+        z_dim=enc_cfg.z_dim,
         g_dim=enc_cfg.g_dim,
         n_actions=5,
         obs_dim=8,
@@ -225,8 +233,27 @@ def build_agent_and_decoder(args):
     )
     decoder = ObsDecoder(dec_cfg)
 
+    # BodyDecoder: action-conditioned counterfactual interoceptive
+    # anticipation. b̂^{(a)}_{t+1} = D_body(z_t, g_t, b_t, a). Loss flows
+    # back through z (encoder) and g (perspective) — this is how g learns
+    # to organize a qualitative field of bodily viability around action
+    # consequences. Output never enters policy logits.
+    if enc_cfg.body_dim > 0:
+        body_dec_cfg = BodyDecoderConfig(
+            z_dim=enc_cfg.z_dim,
+            g_dim=enc_cfg.g_dim,
+            body_dim=enc_cfg.body_dim,
+            n_actions=5,
+            hidden=64,
+        )
+        body_decoder = BodyDecoder(body_dec_cfg)
+    else:
+        body_decoder = None
+
     print(f"[build] Agent params: {count_params(agent)}")
     print(f"[build] Decoder params: {count_params(decoder)}")
+    if body_decoder is not None:
+        print(f"[build] BodyDecoder params: {count_params(body_decoder)}")
     print(f"[build] z_fused={enc_cfg.z_dim} (z_obs={enc_cfg.z_obs_dim} + "
           f"z_body={enc_cfg.body_z_dim}), body_dim={enc_cfg.body_dim}")
     print(f"[build] body-coupled: encoder={enc_cfg.body_dim>0} "
@@ -242,7 +269,7 @@ def build_agent_and_decoder(args):
                if enc_cfg.silhouette_dim > 0 else "silhouette=disabled")
     print(f"[build] {sil_str}")
 
-    return agent, decoder
+    return agent, decoder, body_decoder
 
 
 # ── Training ──
@@ -253,9 +280,11 @@ def train(args):
     # Seed all RNGs BEFORE module construction for reproducibility.
     seed_everything(int(args.seed), deterministic=True)
 
-    agent, decoder = build_agent_and_decoder(args)
+    agent, decoder, body_decoder = build_agent_and_decoder(args)
     agent.to(device)
     decoder.to(device)
+    if body_decoder is not None:
+        body_decoder.to(device)
 
     env_cfg = NZonePhase3Config(
         max_steps=args.max_steps,
@@ -276,6 +305,8 @@ def train(args):
     env = NZonePhase3Env(config=env_cfg)
 
     all_params = list(agent.parameters()) + list(decoder.parameters())
+    if body_decoder is not None:
+        all_params += list(body_decoder.parameters())
     optimizer = torch.optim.Adam(all_params, lr=args.lr)
 
     outdir = Path(args.outdir) if args.outdir else Path(f"outputs/phase3_s{args.seed}")
@@ -425,16 +456,42 @@ def train(args):
             # weight by the (detached) policy distribution. Then the executed
             # action's prediction error serves as an internal cost for the
             # actor objective.
-            xhat_all = decoder.predict_all_actions(out["g"])
+            xhat_all = decoder.predict_all_actions(out["z"], out["g"])
             # xhat_all: (B=1, A=n_actions, obs_dim)
             with torch.no_grad():
                 pi_pred = torch.softmax(logits_pred, dim=-1)  # (1, A)
             xhat_mix = (pi_pred.unsqueeze(-1) * xhat_all).sum(dim=1)  # (1, obs_dim)
             obs_loss = F.mse_loss(xhat_mix, x_next)
 
-            # ─── Body loss ───
-            body_pred_t = out["body_pred"]               # (1, 1)
-            body_loss = F.mse_loss(body_pred_t, body_actual_next)
+            # ─── Body losses (registration + anticipation) ───
+            # Two body prediction paths with distinct roles:
+            #   state body_head:  current bodily continuity / registration
+            #     anchor. Stabilizes body_pred_prev across carried g.
+            #     b̂_state = body_head(state_input, body_t)
+            #   BodyDecoder:      action-conditioned counterfactual
+            #     interoceptive anticipation. Trains z/g to organize the
+            #     field of bodily viability around action consequences.
+            #     b̂^{(a)}_{t+1} = D_body(z_t, g_t, b_t, a)
+            # Both serve the generative/perspectival pathway. Neither
+            # feeds policy logits. Total body loss is the action-
+            # conditioned anticipation main term plus a small auxiliary
+            # weight on state registration.
+            body_pred_state = out["body_pred"]                # (1, 1)
+            body_loss_state_aux = F.mse_loss(body_pred_state, body_actual_next)
+
+            if body_decoder is not None:
+                # action-conditioned anticipation: predict for each action,
+                # take the executed action's prediction. body_actual_t is
+                # the current body state (initial condition for transition).
+                body_pred_all = body_decoder.predict_all_actions(
+                    out["z"], out["g"], body_actual_t,
+                )  # (1, A, body_dim)
+                body_pred_action = body_pred_all[0, a_int].unsqueeze(0)  # (1,1)
+                body_loss_action = F.mse_loss(body_pred_action, body_actual_next)
+                body_loss = (body_loss_action
+                             + args.body_aux_weight * body_loss_state_aux)
+            else:
+                body_loss = body_loss_state_aux
 
             # ─── Smoothness loss on g (slow latent regularizer) ───
             smooth_loss = F.mse_loss(out["g"], g_prev.detach())
@@ -574,7 +631,11 @@ def train(args):
                     "alpha": float(out["alpha"].item()),
                     "g_norm": float(np.linalg.norm(g_np)),
                     "body_state": float(info["body_state"]),
-                    "body_pred": float(body_pred_t.detach().item()),
+                    "body_pred": float(body_pred_state.detach().item()),
+                    "body_pred_action": (
+                        float(body_pred_action.detach().item())
+                        if body_decoder is not None else float("nan")
+                    ),
                     "affordance_here": float(info.get("affordance_here", 0.0)),
                     "perturbation_active": int(info.get("perturbation_active", 0)),
                     "perturbation_trace": float(info.get("perturbation_trace", 0.0)),
@@ -657,7 +718,7 @@ def train(args):
         traj_df.to_parquet(outdir / "traj.parquet", index=False)
         print(f"[save] {outdir / 'traj.parquet'} ({len(traj_df)} rows)")
 
-    torch.save({
+    ckpt = {
         "agent_state": agent.state_dict(),
         "decoder_state": decoder.state_dict(),
         "meta": {
@@ -671,7 +732,11 @@ def train(args):
             "env_cfg": asdict(env_cfg),
             "args": vars(args),
         },
-    }, outdir / "ckpt_final.pt")
+    }
+    if body_decoder is not None:
+        ckpt["body_decoder_state"] = body_decoder.state_dict()
+        ckpt["meta"]["body_decoder_cfg"] = body_decoder.cfg.__dict__
+    torch.save(ckpt, outdir / "ckpt_final.pt")
     print(f"[save] {outdir / 'ckpt_final.pt'}")
 
 
@@ -718,6 +783,17 @@ def parse_args():
                     help="Weight of body drive in actor cost. "
                          "cost_t = obs_PE² + λ · (1 - body_actual_next).")
 
+    # ── Body loss decomposition ──
+    # Total body loss = L_action (BodyDecoder, main) + α · L_state_aux
+    # (state head body_head registration). α is body_aux_weight.
+    # 0.0 = state body_head only learns from g/state-head gradient via
+    # other losses. 0.1 = small auxiliary weight to keep registration
+    # head trained alongside the main anticipation head.
+    ap.add_argument("--body_aux_weight", type=float, default=0.1,
+                    help="Auxiliary weight on state body_head loss "
+                         "(registration anchor) when BodyDecoder is the "
+                         "main body anticipation path.")
+
     # ── Phase 3 body PE routing (asymmetric channels) ──
     # body_err_t (1-d signed) can route to TWO independent destinations:
     #   --body_in_g           → g GRU input (perspective content)
@@ -747,11 +823,11 @@ def parse_args():
     # ── g carry-decay across episode boundaries ──
     # 1.0 = full carry (cumulative; risks ||g|| saturation).
     # 0.0 = full reset every episode (loses long-horizon perspective).
-    # 0.9 (default) = mostly carry with slight per-episode refresh —
-    # preserves perspective formation while preventing magnitude growth
-    # and the saturation-driven instabilities (spontaneous reorganization
-    # cycles) it produces.
-    ap.add_argument("--g_carry_decay", type=float, default=0.9,
+    # 0.99 (default) = preserves nearly the full perspective across
+    # episodes (1% trim per boundary). Earlier 0.9 was found to act as
+    # a small reset that perturbs settling at every episode start;
+    # 0.99 lets g settle as a slow latent.
+    ap.add_argument("--g_carry_decay", type=float, default=0.99,
                     help="Multiplicative decay factor for g at episode "
                          "boundaries. 1.0 = full carry, 0.0 = full reset.")
 

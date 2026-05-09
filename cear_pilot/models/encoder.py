@@ -342,7 +342,7 @@ class EncoderBundle(nn.Module):
         body_t: Optional[torch.Tensor] = None,
         silhouette_t: Optional[torch.Tensor] = None,
     ):
-        """Produce (z_t, p_emb).
+        """Produce (z_t, p_emb, z_body).
 
         Pipeline (body_dim > 0):
             z_obs  = obs_enc(x_t)                      # (B, z_obs_dim)  raw
@@ -353,11 +353,19 @@ class EncoderBundle(nn.Module):
         Pipeline (body_dim == 0):
             z_obs = obs_enc(x_t)
             z_t = obs_enc.apply_gating(z_obs, g_t)
+            z_body = None
 
         silhouette_t (B, silhouette_dim) is consumed by BodyEncoder when
         cfg.silhouette_dim > 0; otherwise ignored.
 
         z_t has dim cfg.z_dim regardless.
+
+        z_body (when not None) is exposed as a separate output so that
+        downstream modules — e.g., the policy in body-to-effector
+        coupling — can use the learned interoceptive representation
+        directly without re-encoding it. Always return z_body raw
+        (pre-gating); gating is for percept synthesis, while z_body is
+        the raw interoceptive channel.
         """
         z_obs = self.obs_enc(x_t)
         if self.has_body_encoder:
@@ -370,6 +378,7 @@ class EncoderBundle(nn.Module):
             z_fused = torch.cat([z_obs, z_body], dim=-1)
         else:
             z_fused = z_obs
+            z_body = None
 
         # Apply g-conditioned gating to the (possibly body-coupled) fused z
         z_t = self.obs_enc.apply_gating(z_fused, g_t=g_t)
@@ -379,4 +388,4 @@ class EncoderBundle(nn.Module):
             p_emb = torch.zeros((B, self.cfg.p_dim), device=x_t.device, dtype=x_t.dtype)
         else:
             p_emb = self.prop_enc(p_t)
-        return z_t, p_emb
+        return z_t, p_emb, z_body

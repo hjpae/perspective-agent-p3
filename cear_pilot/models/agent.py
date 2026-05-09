@@ -209,13 +209,13 @@ class CEARAgent(nn.Module):
                     "encoder.silhouette_dim > 0 but body_silhouette_t was not "
                     "provided. Pass body_silhouette_t each step."
                 )
-            z_t, p_emb = self.enc(
+            z_t, p_emb, z_body = self.enc(
                 x_t, p_t, g_t=self._g,
                 body_t=body_t_for_modules,
                 silhouette_t=sil_for_modules,
             )
         else:
-            z_t, p_emb = self.enc(x_t, p_t, g_t=self._g)
+            z_t, p_emb, z_body = self.enc(x_t, p_t, g_t=self._g)
 
         # world latent — alpha modulated by env PE + body PE
         if ablate_g:
@@ -247,7 +247,11 @@ class CEARAgent(nn.Module):
             s_t = self.state(z_t, p_emb, g_t, M_g=M_g)
             body_pred_t = None
 
-        # policy — body_coupled when policy.body_dim > 0
+        # policy — body-effector coupling via raw body_t only.
+        # z_body is intentionally NOT routed to policy (would turn the
+        # learned interoceptive representation into a direct action knob;
+        # functionalist drift). Affordance enters policy only indirectly,
+        # through the perspective-organized state s_t.
         if self.cfg.policy.body_dim > 0:
             if body_t_for_modules is None:
                 raise RuntimeError(
@@ -270,6 +274,8 @@ class CEARAgent(nn.Module):
             "s": s_t,
             "logits": logits,
         }
+        if z_body is not None:
+            out["z_body"] = z_body
         if body_pred_t is not None:
             out["body_pred"] = body_pred_t
         if body_pe is not None:

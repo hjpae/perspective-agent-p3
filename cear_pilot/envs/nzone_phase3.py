@@ -136,30 +136,36 @@ class NZonePhase3Config(NZonePhase2Config):
     body_init: float = 0.5
     body_min: float = 0.0
     body_max: float = 1.0
-    # Body dynamics magnitudes — amplified for the body-coupled architecture.
-    # Original (Apr 2026 minimal embodiment): metabolic_cost=0.002,
-    # movement_cost=0.002, affordance_to_body_gain=0.02. Step-wise body
-    # change ~0.01 max → body PE ~1e-4. Too small to be a meaningful
-    # learning signal once body PE is integrated into actor cost and used
-    # as a body encoder input (Layer 1 + Layer 2 commitments).
-    # Amplified (May 2026): step-wise body change up to ~0.05, body PE
-    # comfortably in 1e-3 to 1e-2 range, body state ranging meaningfully
-    # in [0, 1] within a 300-step episode under non-trivial behavior.
-    metabolic_cost: float = 0.01
-    movement_cost: float = 0.01
-    affordance_to_body_gain: float = 0.10
+    # Body dynamics magnitudes — calibrated for SMOOTH body dynamics.
+    #
+    # Iteration history:
+    #   Apr 2026 (minimal):      metabolic=0.002, movement=0.002, gain=0.02
+    #     → step-wise body change ~0.01, body PE ~1e-4. Too small to be a
+    #       meaningful learning signal for body-coupled architecture.
+    #   May 2026 (amplified ×5): metabolic=0.01,  movement=0.01,  gain=0.10
+    #     → step-wise change ~0.05, body PE 1e-3 to 1e-2. Magnitudes
+    #       substantial, but body saturates to 0 or 1 within ~10 steps and
+    #       stays clipped → bang-bang switch dynamics, ~76% saturation
+    #       fraction. Body becomes a binary signal, not a smooth viability
+    #       state.
+    #   May 2026 (smooth):       metabolic=0.003, movement=0.003, gain=0.04
+    #     → step-wise change ~0.02 max, body PE ~1e-3. Body ranges
+    #       meaningfully in [0, 1] over 200-step episode, saturates only
+    #       under sustained one-way trajectories. Smooth viability signal.
+    metabolic_cost: float = 0.003
+    movement_cost: float = 0.003
+    affordance_to_body_gain: float = 0.04
 
     # ----- body silhouette (optional, toggleable) -----
     # When silhouette_dim > 0, the env produces a body_silhouette feature
     # in info dict: a directional affordance "felt sense" of the agent's
     # 4 cardinal neighbors (N, S, W, E), with Gaussian noise σ.
-    # This instantiates "어느 정도 직감" — partial/blurred interoceptive
-    # sense of surrounding affordance via body. Visual perception remains
-    # affordance-blind; silhouette is interoceptive.
+    # This instantiates partial/blurred interoceptive sense of surrounding affordance via body. 
+    # Visual perception remains affordance-blind; silhouette is interoceptive.
     # silhouette_dim = 0 disables (agent receives only body_state, 1-d).
     # silhouette_dim = 4 enables N/S/W/E directional silhouette.
     silhouette_dim: int = 0
-    silhouette_noise_sigma: float = 0.2
+    silhouette_noise_sigma: float = 0.1
 
     # ----- termination -----
     terminate_on_body_min: bool = False
