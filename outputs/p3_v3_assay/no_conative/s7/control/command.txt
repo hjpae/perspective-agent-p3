@@ -1,0 +1,1 @@
+python -m cear_pilot.scripts.run_phase3_perturb_assay --ckpt outputs/p3_v3_cohorts/no_conative/s7/ckpt_final.pt --condition control --steps 160 --shock_start 60 --shock_duration 20 --body_u_shock_delta -0.08 --env_perturb_scale 0.20 --device cuda --outdir outputs/p3_v3_assay/no_conative/s7/control

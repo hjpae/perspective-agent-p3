@@ -1,0 +1,67 @@
+[build] Agent params: 87241
+[build] Decoder params: 7136
+[build] BodyDecoder params: 6810
+[build] z_fused=20 (z_obs=16 + z_body=4), body_dim=1
+[build] body-coupled: encoder=True policy=True state=True
+[build] body_in_g=True (scale=20.0)  body_err_in_alpha=False  obs_dim=8
+[build] g_carry_decay=0.99  (1.0=full carry, 0.0=full reset)
+[build] silhouette_dim=4 (σ=0.1)
+[save] outputs/p3_v3_assay/full/s26/body_shock/assay_traj.parquet (160 rows)
+[save] outputs/p3_v3_assay/full/s26/body_shock/assay_summary.json
+{
+  "pre": {
+    "n": 60,
+    "top_occ": 0.16666666666666666,
+    "TR_occ": 0.16666666666666666,
+    "bottom_occ": 0.0,
+    "body_state_mean": 0.49444750100374224,
+    "body_u_mean": -0.0222328366433616,
+    "obs_pe_mean": 0.011157328249343361,
+    "q_UP_minus_DOWN_mean": 0.20214519426226615,
+    "pred_trend_UP_minus_DOWN_mean": 0.10246754015485446,
+    "alpha_mean": 0.035048688451449074,
+    "g_norm_mean": 2.0241556495428084,
+    "g_delta_norm_mean": 0.05747910194719831
+  },
+  "shock": {
+    "n": 20,
+    "top_occ": 0.35,
+    "TR_occ": 0.35,
+    "bottom_occ": 0.0,
+    "body_state_mean": 0.3196680895984173,
+    "body_u_mean": -0.7823487518084739,
+    "obs_pe_mean": 0.009626993676647544,
+    "q_UP_minus_DOWN_mean": 0.21218002513051032,
+    "pred_trend_UP_minus_DOWN_mean": 0.11636639721691608,
+    "alpha_mean": 0.030186309665441512,
+    "g_norm_mean": 2.954327666759491,
+    "g_delta_norm_mean": 0.041911848727613686
+  },
+  "recovery": {
+    "n": 80,
+    "top_occ": 0.1625,
+    "TR_occ": 0.1625,
+    "bottom_occ": 0.0375,
+    "body_state_mean": 0.22343742661178112,
+    "body_u_mean": -1.2469637574064623,
+    "obs_pe_mean": 0.01713221147074364,
+    "q_UP_minus_DOWN_mean": 0.19029105976223945,
+    "pred_trend_UP_minus_DOWN_mean": 0.10187846142798662,
+    "alpha_mean": 0.030542035400867463,
+    "g_norm_mean": 3.1874613791704176,
+    "g_delta_norm_mean": 0.015358684852253645
+  },
+  "residue_recovery_minus_pre": {
+    "top_occ": -0.004166666666666652,
+    "TR_occ": -0.004166666666666652,
+    "bottom_occ": 0.0375,
+    "body_state_mean": -0.2710100743919611,
+    "body_u_mean": -1.2247309207631007,
+    "obs_pe_mean": 0.005974883221400279,
+    "q_UP_minus_DOWN_mean": -0.011854134500026703,
+    "pred_trend_UP_minus_DOWN_mean": -0.0005890787268678366,
+    "alpha_mean": -0.004506653050581611,
+    "g_norm_mean": 1.1633057296276093,
+    "g_delta_norm_mean": -0.042120417094944664
+  }
+}

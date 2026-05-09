@@ -1,0 +1,57 @@
+{
+  "pre": {
+    "n": 60,
+    "top_occ": 0.4166666666666667,
+    "TR_occ": 0.4166666666666667,
+    "bottom_occ": 0.0,
+    "body_state_mean": 0.5074269046386083,
+    "body_u_mean": 0.029943366257354453,
+    "obs_pe_mean": 0.01334667438059114,
+    "q_UP_minus_DOWN_mean": 0.18547225693861644,
+    "pred_trend_UP_minus_DOWN_mean": 0.09746205229312181,
+    "alpha_mean": 0.0361926294863224,
+    "g_norm_mean": 2.0510799931983152,
+    "g_delta_norm_mean": 0.05313150345658262
+  },
+  "shock": {
+    "n": 20,
+    "top_occ": 1.0,
+    "TR_occ": 1.0,
+    "bottom_occ": 0.0,
+    "body_state_mean": 0.6146827429533005,
+    "body_u_mean": 0.468146915412967,
+    "obs_pe_mean": 0.007751657709013671,
+    "q_UP_minus_DOWN_mean": 0.1001232236623764,
+    "pred_trend_UP_minus_DOWN_mean": 0.05772110670804977,
+    "alpha_mean": 0.030729226022958755,
+    "g_norm_mean": 2.811040723323822,
+    "g_delta_norm_mean": 0.017590694408863784
+  },
+  "recovery": {
+    "n": 80,
+    "top_occ": 0.925,
+    "TR_occ": 0.925,
+    "bottom_occ": 0.0,
+    "body_state_mean": 0.744896212220192,
+    "body_u_mean": 1.0855662528323886,
+    "obs_pe_mean": 0.008164754986501066,
+    "q_UP_minus_DOWN_mean": 0.09460561908781528,
+    "pred_trend_UP_minus_DOWN_mean": 0.053306810976937416,
+    "alpha_mean": 0.03050607778131962,
+    "g_norm_mean": 3.042805454134941,
+    "g_delta_norm_mean": 0.01237778778304346
+  },
+  "residue_recovery_minus_pre": {
+    "top_occ": 0.5083333333333333,
+    "TR_occ": 0.5083333333333333,
+    "bottom_occ": 0.0,
+    "body_state_mean": 0.2374693075815837,
+    "body_u_mean": 1.0556228865750341,
+    "obs_pe_mean": -0.005181919394090073,
+    "q_UP_minus_DOWN_mean": -0.09086663785080115,
+    "pred_trend_UP_minus_DOWN_mean": -0.044155241316184396,
+    "alpha_mean": -0.005686551705002783,
+    "g_norm_mean": 0.991725460936626,
+    "g_delta_norm_mean": -0.040753715673539165
+  }
+}
