@@ -1,37 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-Paper Figure 6 (MAIN, 1x3): Same-state history-g probe — the core CEAR result.
-
-Procedure
----------
-For each cohort × seed:
-  1. Run a body-shock and a control assay (frozen agent), and collect the
-     recovery-phase g trajectories.
-  2. Construct identical probe inputs (27 grid positions × body levels).
-  3. Inject control-history g vs shock-history g into the SAME probe input,
-     keeping z, body_state, action context identical.
-  4. Measure the difference in (a) g representation, (b) policy state s,
-     (c) Fisher-style metric M_g induced by g.
+Paper Figure 6 v4: Same-state history probe — two-panel version.
 
 Message
 -------
-Same input + different bodily perturbation history →
-  - No body→g: no change (g is the same regardless of history → trivial).
-  - No conation: g and s shift, but metric structure does not consistently
-    reshape (Δ tr(M_g) ≈ 0; cohort-level reversal).
-  - Full: g and s shift AND metric tensor reshapes in a consistent direction
-    (Δ tr(M_g) > 0).
+For identical probe inputs, recovery-phase shock-history g and control-history
+g induce separable downstream organization. This version keeps only the two
+core readouts:
+  (a) policy-facing state separation
+  (b) perspective-induced metric-geometry separation
 
-This is the paper's strongest dissociation: behavioral metrics alone cannot
-distinguish Full from No body→g (Figure 2), but here, on identical inputs,
-the two diverge sharply — bodily perturbation history has been incorporated
-into perspective geometry only when body PE is routed into g.
+The previous readiness-shift panel is intentionally removed because it was a
+noisier downstream echo and did not add a distinct claim beyond the state and
+metric-geometry readouts.
 
-Data
-----
-Input: same_state_history_probe_shock_control_diff_recovery_mean.csv
-  - 30 seeds × 3 cohorts × 27 probe specs = 2,430 rows
-  - Aggregate to seed level (mean across 27 specs) before plotting.
+Design
+------
+- Removed the schematic panel. Use a separate TikZ/vector schematic if needed.
+- Removed legend; cohort identity is given directly by x-axis labels.
+- Distance panels use log y-scale to show the No body→g collapse without
+  hiding heavy-tailed seed-level effects.
 
 Spyder usage
 ------------
@@ -43,16 +31,22 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-from matplotlib.patches import Patch
 from pathlib import Path
+from scipy import stats
+from itertools import combinations
 
 
 # %% ─── CONFIG ──────────────────────────────────────────────────────────────
 
 INPUT_CSV = "outputs/p3_v3_same_state_probe/same_state_history_probe_shock_control_diff_recovery_mean.csv"
 OUTDIR    = "./figures"
-NAME      = "figure6_same_state"
+NAME      = "figure6_same_state_2panel"
 FORMATS   = ["pdf", "png"]
+
+# Sandbox fallback. Leave this block as-is; it does not affect project-root runs.
+if not Path(INPUT_CSV).exists():
+    INPUT_CSV = "/mnt/data/same_state_history_probe_shock_control_diff_recovery_mean.csv"
+    OUTDIR = "/mnt/data/figures"
 
 
 # %% ─── STYLE ───────────────────────────────────────────────────────────────
@@ -71,18 +65,14 @@ mpl.rcParams.update({
     'axes.spines.top':   False,
     'axes.spines.right': False,
     'axes.linewidth':    0.8,
+    'xtick.major.width': 0.8,
+    'ytick.major.width': 0.8,
 })
 
 COLORS = {
     'full':         '#2c5282',
     'no_conative':  '#c0392b',
     'no_body_in_g': '#8b7355',
-}
-
-COHORT_LABELS = {
-    'full':         'Full',
-    'no_conative':  'No conation',
-    'no_body_in_g': 'No body→g',
 }
 
 COHORT_LABELS_2L = {
@@ -94,32 +84,39 @@ COHORT_LABELS_2L = {
 COHORT_ORDER = ['full', 'no_conative', 'no_body_in_g']
 
 
-# %% ─── LOAD & AGGREGATE TO SEED LEVEL ──────────────────────────────────────
+# %% ─── LOAD & DERIVE ───────────────────────────────────────────────────────
 
 df_raw = pd.read_csv(INPUT_CSV)
 print(f"Loaded {len(df_raw)} rows from {INPUT_CSV}")
 print(f"Cohorts: {df_raw['cohort'].value_counts().to_dict()}")
 print(f"Seeds per cohort: {df_raw.groupby('cohort')['seed'].nunique().to_dict()}")
 
+eig_cols = [f"shock_minus_control.metric_eig_{i}" for i in range(20)]
+
+# Spectrum distance: L2 norm of the shock-control eigenvalue-difference vector.
+df_raw['metric_spectrum_distance'] = np.sqrt((df_raw[eig_cols] ** 2).sum(axis=1))
+
+
 metric_cols = [
-    "shock_minus_control.metric_trace",
-    "s_distance_shock_control",
-    "g_distance_shock_control",
+    's_distance_shock_control',
+    'metric_spectrum_distance',
 ]
-df = df_raw.groupby(["cohort", "seed"], as_index=False)[metric_cols].mean()
+# Seed-level mean across identical probe specifications.
+df = df_raw.groupby(['cohort', 'seed'], as_index=False)[metric_cols].mean()
 
 
 # %% ─── PANEL DRAW ──────────────────────────────────────────────────────────
 
 def draw_panel(ax, df, col, title, ylabel, ylim, panel_id,
-               zero_ref=True, panel_x=-0.20,
+               log_y=False, panel_x=-0.20,
                box_width=0.46, dot_jitter=0.13, dot_size=10,
                dot_alpha=0.45, box_alpha=0.22, median_lw=2.4,
                jitter_seed=42):
-    """Standard cohort comparison panel. Same visual grammar as Figs 2, 4."""
+    """Median + IQR box + seed dots, same grammar as other figures."""
     rng = np.random.default_rng(jitter_seed)
+
     for i, cohort in enumerate(COHORT_ORDER):
-        g = df[df["cohort"] == cohort][col].to_numpy()
+        g = df[df['cohort'] == cohort][col].dropna().to_numpy()
         med = np.median(g)
         q25, q75 = np.quantile(g, [0.25, 0.75])
 
@@ -128,61 +125,154 @@ def draw_panel(ax, df, col, title, ylabel, ylim, panel_id,
                edgecolor=COLORS[cohort], linewidth=1.0, zorder=2)
         ax.hlines(med, i - box_width/2, i + box_width/2,
                   colors=COLORS[cohort], linewidth=median_lw, zorder=4)
+
         xs = i + rng.uniform(-dot_jitter, dot_jitter, size=len(g))
         ax.scatter(xs, g, s=dot_size, color=COLORS[cohort], alpha=dot_alpha,
                    edgecolor='none', zorder=3)
 
-    if zero_ref:
-        ax.axhline(0, color='gray', linewidth=0.6, linestyle='--',
-                   alpha=0.5, zorder=1)
     ax.set_xticks(range(len(COHORT_ORDER)))
     ax.set_xticklabels([COHORT_LABELS_2L[c] for c in COHORT_ORDER], fontsize=8)
     ax.set_ylabel(ylabel)
     ax.set_title(title, fontsize=9.5, pad=4)
+    if log_y:
+        ax.set_yscale('log')
     if ylim is not None:
         ax.set_ylim(*ylim)
-    ax.grid(axis='y', alpha=0.22, linestyle=':', linewidth=0.5)
+    ax.grid(axis='y', alpha=0.22, linestyle=':', linewidth=0.5, which='both')
     ax.set_axisbelow(True)
     ax.text(panel_x, 1.05, panel_id, transform=ax.transAxes,
             fontsize=10, fontweight='bold', va='bottom', ha='left')
 
 
-def build_legend(ax, loc='upper right'):
-    handles = [Patch(facecolor=COLORS[c], alpha=0.4,
-                     edgecolor=COLORS[c], label=COHORT_LABELS[c])
-               for c in COHORT_ORDER]
-    ax.legend(handles=handles, loc=loc, frameon=False, fontsize=7.5,
-              handletextpad=0.5, borderaxespad=0.3)
-
-
 # %% ─── PANEL SPECS ─────────────────────────────────────────────────────────
-# (col, title, ylabel, ylim, panel_id)
+# (col, title, ylabel, ylim, panel_id, log_y)
 
 PANELS = [
-    ("g_distance_shock_control",
-     "Perspective representation",
-     r"$\Vert g^{\mathrm{shock}} - g^{\mathrm{ctrl}} \Vert$",
-     (0, 1.6), '(a)'),
-    ("s_distance_shock_control",
-     "Policy state",
-     r"$\Vert s^{\mathrm{shock}} - s^{\mathrm{ctrl}} \Vert$",
-     (0, 0.9), '(b)'),
-    ("shock_minus_control.metric_trace",
-     "Metric trace",
-     r"$\Delta\, \mathrm{tr}(M_g)$",
-     (-1, 3), '(c)'),
+    ('s_distance_shock_control',
+     'Policy-state separation',
+     'Policy-state distance',
+     (0.008, 3.2), '(a)', True),
+    ('metric_spectrum_distance',
+     'Metric-geometry separation',
+     'Metric-spectrum distance',
+     (0.003, 30.0), '(b)', True),
 ]
+
+
+# %% ─── STATISTICS ──────────────────────────────────────────────────────────
+# Seed-level Mann-Whitney U (two-sided, non-parametric) with rank-biserial
+# effect size and BH-FDR correction over the three cohort pairs.
+# Expected pattern, mirroring Figure 5:
+#   Full vs No conation       : n.s.  (both retain residue under identical
+#                                       inputs once body→g routing is present)
+#   Full vs No body→g         : ***
+#   No conation vs No body→g  : ***
+
+COHORT_DISPLAY = {'full': 'Full', 'no_conative': 'No conation',
+                  'no_body_in_g': 'No body→g'}
+
+
+def _mannwhitney_with_effect(a, b):
+    a = np.asarray(a, dtype=float); a = a[~np.isnan(a)]
+    b = np.asarray(b, dtype=float); b = b[~np.isnan(b)]
+    n1, n2 = len(a), len(b)
+    if n1 == 0 or n2 == 0:
+        return dict(U=np.nan, p=np.nan, r=np.nan, n1=n1, n2=n2)
+    U, p = stats.mannwhitneyu(a, b, alternative='two-sided')
+    # rank-biserial r = 1 − 2U/(n1·n2). Sign: positive when a > b in rank.
+    r = 1.0 - 2.0 * U / (n1 * n2)
+    return dict(U=U, p=p, r=r, n1=n1, n2=n2)
+
+
+def _bh_fdr(pvals):
+    p = np.asarray(pvals, dtype=float)
+    n = len(p)
+    order = np.argsort(p)
+    ranks = np.argsort(order) + 1
+    p_sorted = p[order]
+    p_adj_sorted = np.minimum.accumulate(
+        (p_sorted * n / np.arange(1, n + 1))[::-1])[::-1]
+    p_adj_sorted = np.minimum(p_adj_sorted, 1.0)
+    return p_adj_sorted[ranks - 1]
+
+
+def _stars(p):
+    if np.isnan(p):  return ""
+    if p < 0.001:    return "***"
+    if p < 0.01:     return "**"
+    if p < 0.05:     return "*"
+    return "n.s."
+
+
+def _fmt_p(p):
+    if np.isnan(p): return "  n/a"
+    if p < 0.001:   return "<.001"
+    return f"{p:.3f}"
+
+
+def print_metric_stats(df, value_col, label):
+    """Per-cohort summary + pairwise Mann-Whitney with BH-FDR.
+
+    The unit of analysis is the seed (one value per cohort × seed, obtained
+    by averaging across the identical probe specifications).
+    """
+    print(f"\n  [{label}]  ({value_col})")
+    print(f"    {'cohort':<14s} {'n':>3s}  {'median':>9s}  {'IQR':>20s}")
+    for c in COHORT_ORDER:
+        v = df[df['cohort'] == c][value_col].dropna().to_numpy()
+        med = np.median(v)
+        q25, q75 = np.quantile(v, [0.25, 0.75])
+        iqr_str = f"[{q25:.3f}, {q75:.3f}]"
+        print(f"    {COHORT_DISPLAY[c]:<14s} {len(v):>3d}  {med:>9.3f}  {iqr_str:>20s}")
+    pairs = list(combinations(COHORT_ORDER, 2))
+    results = []
+    for a, b in pairs:
+        ga = df[df['cohort'] == a][value_col].to_numpy()
+        gb = df[df['cohort'] == b][value_col].to_numpy()
+        res = _mannwhitney_with_effect(ga, gb)
+        res['pair'] = (a, b)
+        results.append(res)
+    p_adj = _bh_fdr([r['p'] for r in results])
+    print(f"    {'pair':<32s} {'U':>7s}  {'p_raw':>6s}  {'p_adj':>6s}  "
+          f"{'r_rb':>6s}  sig")
+    for r, padj in zip(results, p_adj):
+        a, b = r['pair']
+        pair_str = f"{COHORT_DISPLAY[a]} vs {COHORT_DISPLAY[b]}"
+        sig = _stars(padj)
+        print(f"    {pair_str:<32s} {r['U']:>7.1f}  "
+              f"{_fmt_p(r['p']):>6s}  {_fmt_p(padj):>6s}  "
+              f"{r['r']:>+6.2f}  {sig}")
+
+
+def print_stats_report(df, metrics, title="Statistics report"):
+    print("\n" + "=" * 70)
+    print(title)
+    print("=" * 70)
+    print("  Unit of analysis: seed/run (probe specifications averaged within seed).")
+    print("  Test: Mann-Whitney U (two-sided), with BH-FDR correction over the")
+    print("  three cohort pairs, computed independently for each metric.")
+    print("  Effect size: rank-biserial r = 1 − 2U/(n1·n2), range [−1, +1].")
+    print("  Sign of r: positive when the first cohort tends to exceed the second.")
+    for col, label in metrics:
+        print_metric_stats(df, col, label)
+    print()
 
 
 # %% ─── RUN ─────────────────────────────────────────────────────────────────
 
-fig, axes = plt.subplots(1, 3, figsize=(7.5, 3.0))
+fig, axes = plt.subplots(1, 2, figsize=(5.4, 2.9))
 for ax, args in zip(axes, PANELS):
     draw_panel(ax, df, *args)
-build_legend(axes[0])
+
 plt.tight_layout()
-plt.subplots_adjust(top=0.88, wspace=0.45)
+plt.subplots_adjust(top=0.86, wspace=0.38)
 plt.show()
+
+# Statistics — printed to console, not on figure.
+print_stats_report(df, [
+    ("s_distance_shock_control",  "Policy-state distance"),
+    ("metric_spectrum_distance",  "Metric-spectrum distance"),
+], title="Figure 6 — Same-state history probe")
 
 
 # %% ─── SAVE ────────────────────────────────────────────────────────────────

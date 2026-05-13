@@ -1,77 +1,61 @@
 # -*- coding: utf-8 -*-
 """
-Paper Figure 5: Body perturbation reshapes perspective geometry — but only
-when body PE is routed into the perspective latent.
-
-Procedure
----------
-Frozen trained agents (no gradient updates) undergo a paired assay:
-  control     : ordinary online dynamics for 160 steps
-  body_shock  : same trajectory, but with body_u perturbation of -0.08 per
-                step injected during a shock window (t=40..70)
-Recovery phase (t=80..159) is analyzed: how does the perspective state
-relax after the perturbation has ended?
+Paper Figure 5: Body perturbation leaves residue in perspective geometry.
 
 Message
 -------
-- (a, b, c) Top row: per-seed perspective displacement (shock centroid −
-  control centroid) in the first two principal components of g, anchored
-  at the origin. Each arrow is one seed's displacement; the thick black
-  arrow is the cohort-mean. Dotted reference circles at radii 0.5/1.0/1.5.
-    Full         : arrows fan broadly, some past r=1.5.
-    No conation  : arrows concentrate inside r≈1.0.
-    No body→g    : arrows collapse to a small ball inside r≈0.5 — same
-                    input under different perturbation histories yields
-                    nearly the same g, because body PE is not routed into
-                    the perspective latent.
-
-- (d) Shock magnitude on body_u is identical across cohorts (≈ -1.25).
-  Clean control: downstream divergence is not driven by uneven perturbation.
-- (e) PC centroid distance summarizes the top row.
-- (f) Metric spectral L2 (L2 distance between sorted eigenvalue spectra of
-  the Fisher-style metric M_g, control vs shock): full and no_conative both
-  show clear spectral reshaping in magnitude; no_body_in_g does not.
-  (The direction of reshape is examined in Figure 6.)
-
-Data
-----
-Inputs:
-  assay_g_pca_points.csv             — time-resolved (PC1, PC2, PC3)
-  body_shock_control_phase_diff.csv  — phase-level shock − control diffs
-  assay_phase_geometry_summary.csv   — phase-level M_g eigenvalues
+- Top row: per-seed displacement vectors in PCA space. Each arrow is one
+  seed's recovery-phase shock-minus-control displacement. No cohort-mean
+  arrow is drawn, because it visually occludes the individual trajectories.
+- Bottom row: compact summaries in full perspective state space and in the
+  stance-dependent metric geometry.
+- Main comparison: Full and No conation retain geometry-level residue; No
+  body→g collapses toward zero, showing that body prediction error must enter
+  the perspective latent for bodily perturbation history to reshape geometry.
 
 Spyder usage
 ------------
 1. Edit CONFIG below.
-2. Run File (F5), or run cell by cell.
+2. Run File (F5), or run cell by cell (Ctrl+Enter in each # %% block).
 """
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+from matplotlib.lines import Line2D
 from pathlib import Path
+from scipy import stats
+from itertools import combinations
 
 
 # %% ─── CONFIG ──────────────────────────────────────────────────────────────
+# Edit these and re-run.
 
 INPUT_PCA            = "outputs/p3_v3_assay_geometry/assay_g_pca_points.csv"
 INPUT_PHASE_DIFF     = "outputs/p3_v3_assay_geometry/body_shock_control_phase_diff.csv"
 INPUT_PHASE_GEOMETRY = "outputs/p3_v3_assay_geometry/assay_phase_geometry_summary.csv"
 OUTDIR  = "./figures"
-NAME    = "figure5_geometry"
+NAME    = "figure5_geometry_v4"
 FORMATS = ["pdf", "png"]
 
 PHASE   = "recovery"
 
+# Sandbox fallback only; harmless in Spyder if your relative paths exist.
+if not Path(INPUT_PCA).exists() and Path("/mnt/data/assay_g_pca_points.csv").exists():
+    INPUT_PCA            = "/mnt/data/assay_g_pca_points.csv"
+    INPUT_PHASE_DIFF     = "/mnt/data/body_shock_control_phase_diff.csv"
+    INPUT_PHASE_GEOMETRY = "/mnt/data/assay_phase_geometry_summary.csv"
+    OUTDIR               = "/mnt/data/figures"
 
-# %% ─── STYLE ───────────────────────────────────────────────────────────────
+
+# %% ─── STYLE (LNCS-friendly serif, no top/right spines) ────────────────────
 
 mpl.rcParams.update({
     'font.family':       'serif',
     'font.serif':        ['DejaVu Serif', 'Liberation Serif', 'Times New Roman'],
     'font.size':         9,
-    'axes.labelsize':    9,
+    'axes.labelsize':    8.5,
     'axes.titlesize':    9.5,
     'xtick.labelsize':   8,
     'ytick.labelsize':   8,
@@ -81,6 +65,8 @@ mpl.rcParams.update({
     'axes.spines.top':   False,
     'axes.spines.right': False,
     'axes.linewidth':    0.8,
+    'xtick.major.width': 0.8,
+    'ytick.major.width': 0.8,
 })
 
 COLORS = {
@@ -122,34 +108,9 @@ print(f"Geometry    : {len(df_geom)} rows")
 
 # %% ─── DERIVED METRICS ─────────────────────────────────────────────────────
 
-def per_seed_pc_centroid_dist(df_pca_in):
-    """For each (cohort, seed), Euclidean distance between control and shock
-    centroids in (PC1, PC2, PC3) space."""
-    rows = []
-    for (cohort, seed), g in df_pca_in.groupby(["cohort", "seed"]):
-        ctrl = g[g["condition"] == "control"][["PC1", "PC2", "PC3"]].mean()
-        shock = g[g["condition"] == "body_shock"][["PC1", "PC2", "PC3"]].mean()
-        rows.append({"cohort": cohort, "seed": seed,
-                     "centroid_dist_3d": np.linalg.norm(shock.values - ctrl.values)})
-    return pd.DataFrame(rows)
-
-
-def per_seed_metric_spectral_l2(df_geom_in, n_eig=20):
-    """For each (cohort, seed), L2 distance between sorted eigenvalue
-    spectra of the Fisher metric M_g, control vs shock."""
-    eig_cols = [f"M_g_eig_{i}" for i in range(n_eig)]
-    rows = []
-    for (cohort, seed), g in df_geom_in.groupby(["cohort", "seed"]):
-        ctrl = g[g["condition"] == "control"][eig_cols].mean().values
-        shock = g[g["condition"] == "body_shock"][eig_cols].mean().values
-        spec_l2 = np.linalg.norm(np.sort(shock)[::-1] - np.sort(ctrl)[::-1])
-        rows.append({"cohort": cohort, "seed": seed, "spectral_l2": spec_l2})
-    return pd.DataFrame(rows)
-
-
 def per_seed_pc2_displacement(df_pca_in):
     """For each (cohort, seed), the (ΔPC1, ΔPC2) displacement vector from
-    control centroid to shock centroid. Used by the displacement-fan panel."""
+    control centroid to body-shock centroid."""
     rows = []
     for (cohort, seed), g in df_pca_in.groupby(["cohort", "seed"]):
         ctrl = g[g["condition"] == "control"][["PC1", "PC2"]].mean().values
@@ -160,9 +121,43 @@ def per_seed_pc2_displacement(df_pca_in):
     return pd.DataFrame(rows)
 
 
-centroid_df = per_seed_pc_centroid_dist(df_pca)
-spec_df     = per_seed_metric_spectral_l2(df_geom)
-disp_df     = per_seed_pc2_displacement(df_pca)
+disp_df = per_seed_pc2_displacement(df_pca)
+
+# Use phase-level distances from the analysis pipeline, plus one signed
+# metric-scale summary. Keep labels short in the plot; define details here.
+summary_df = df_diff[[
+    "cohort", "seed",
+    "shock_control_g_centroid_dist",
+    "shock_control_metric_spectral_l2",
+]].copy()
+summary_df = summary_df.rename(columns={
+    "shock_control_g_centroid_dist": "g_distance",
+    "shock_control_metric_spectral_l2": "metric_spectrum_distance",
+})
+
+# Metric anisotropy distance.  This uses the condition number of the
+# perspective-induced metric M_g: anisotropy(M) = log(kappa(M)).
+# The plotted value is |log(kappa_shock) - log(kappa_control)|, so it
+# captures shock-control changes in directional selectivity, not total scale.
+def metric_anisotropy_distance(df_geom_in, eps=1e-8):
+    rows = []
+    for (cohort, seed), g in df_geom_in.groupby(["cohort", "seed"]):
+        ctrl = g[g["condition"] == "control"]
+        shock = g[g["condition"] == "body_shock"]
+        if len(ctrl) == 0 or len(shock) == 0:
+            continue
+        cond_ctrl = float(ctrl["metric_cond"].iloc[0])
+        cond_shock = float(shock["metric_cond"].iloc[0])
+        anis_dist = abs(np.log(cond_shock + eps) - np.log(cond_ctrl + eps))
+        rows.append({
+            "cohort": cohort,
+            "seed": seed,
+            "metric_anisotropy_distance": anis_dist,
+        })
+    return pd.DataFrame(rows)
+
+aniso_df = metric_anisotropy_distance(df_geom)
+summary_df = summary_df.merge(aniso_df, on=["cohort", "seed"], how="left")
 
 
 # %% ─── DRAW: DISPLACEMENT FAN PANEL ────────────────────────────────────────
@@ -171,17 +166,9 @@ def draw_displacement_fan(ax, disp_df, cohort, panel_id,
                           xlim=(-2.0, 2.0), ylim=(-2.0, 2.0),
                           ref_radii=(0.5, 1.0, 1.5),
                           show_radius_labels=False,
-                          arrow_alpha=0.55, arrow_lw=1.1,
-                          tip_size=18,
-                          mean_arrow_lw=2.5, mean_arrow_mut=18):
-    """Per-seed (ΔPC1, ΔPC2) anchored at origin, plus cohort-mean arrow.
-
-    Visual knobs:
-      ref_radii          — tuple of reference circle radii
-      arrow_alpha,_lw    — per-seed arrow style
-      tip_size           — endpoint X marker
-      mean_arrow_lw,_mut — cohort-mean arrow style
-    """
+                          arrow_alpha=0.52, arrow_lw=1.0,
+                          tip_size=16):
+    """Per-seed (ΔPC1, ΔPC2) anchored at origin. No mean arrow."""
     # Reference circles
     for r in ref_radii:
         circ = plt.Circle((0, 0), r, fill=False, color='gray',
@@ -192,7 +179,6 @@ def draw_displacement_fan(ax, disp_df, cohort, panel_id,
             ax.text(r, -0.08, f"{r}", fontsize=6.5, color='gray',
                     ha='center', va='top', alpha=0.7)
 
-    # Per-seed arrows
     sub = disp_df[disp_df["cohort"] == cohort]
     disps = sub[["dPC1", "dPC2"]].to_numpy()
     for dx, dy in disps:
@@ -201,18 +187,12 @@ def draw_displacement_fan(ax, disp_df, cohort, panel_id,
                                     color=COLORS[cohort],
                                     alpha=arrow_alpha, lw=arrow_lw,
                                     shrinkA=0, shrinkB=0))
-        ax.scatter(dx, dy, s=tip_size, color=COLORS[cohort], alpha=0.75,
-                   edgecolor='white', linewidth=0.4, marker='X', zorder=4)
+        ax.scatter(dx, dy, s=tip_size, color=COLORS[cohort], alpha=0.74,
+                   edgecolor='white', linewidth=0.35, marker='X', zorder=4)
 
-    # Cohort-mean arrow (thick black)
-    mean_disp = disps.mean(axis=0)
-    ax.annotate("", xy=tuple(mean_disp), xytext=(0, 0),
-                arrowprops=dict(arrowstyle="-|>",
-                                color="black", lw=mean_arrow_lw,
-                                shrinkA=0, shrinkB=0,
-                                mutation_scale=mean_arrow_mut), zorder=10)
-    ax.scatter(0, 0, s=50, color='white', edgecolor='black',
-               linewidth=1.5, marker='o', zorder=11)
+    # Quiet origin marker only.
+    ax.scatter(0, 0, s=22, color='white', edgecolor='black',
+               linewidth=0.8, marker='o', zorder=5)
 
     ax.set_title(COHORT_TITLES[cohort], fontsize=10)
     ax.set_xlabel(r"$\Delta$PC1", fontsize=8.5)
@@ -224,16 +204,17 @@ def draw_displacement_fan(ax, disp_df, cohort, panel_id,
             fontsize=10, fontweight='bold', va='bottom', ha='left')
 
 
-# %% ─── DRAW: SUMMARY BAR PANEL ─────────────────────────────────────────────
+# %% ─── DRAW: SUMMARY PANEL ─────────────────────────────────────────────────
 
 def draw_summary_panel(ax, df, col, ylabel, ylim, panel_id, title,
                        zero_ref=True,
                        box_width=0.46, dot_jitter=0.13, dot_size=10,
                        dot_alpha=0.45, box_alpha=0.22, median_lw=2.4,
-                       jitter_seed=42, panel_x=-0.20):
+                       jitter_seed=42, panel_x=-0.15, ylabel_pad=1):
+    """Median + IQR box + scatter of per-seed values."""
     rng = np.random.default_rng(jitter_seed)
     for i, cohort in enumerate(COHORT_ORDER):
-        g = df[df["cohort"] == cohort][col].to_numpy()
+        g = df[df["cohort"] == cohort][col].dropna().to_numpy()
         med = np.median(g)
         q25, q75 = np.quantile(g, [0.25, 0.75])
 
@@ -251,7 +232,7 @@ def draw_summary_panel(ax, df, col, ylabel, ylim, panel_id, title,
                    alpha=0.5, zorder=1)
     ax.set_xticks(range(len(COHORT_ORDER)))
     ax.set_xticklabels([COHORT_LABELS_2L[c] for c in COHORT_ORDER], fontsize=8)
-    ax.set_ylabel(ylabel)
+    ax.set_ylabel(ylabel, labelpad=ylabel_pad)
     if ylim is not None:
         ax.set_ylim(*ylim)
     ax.set_title(title, fontsize=9.5, pad=4)
@@ -261,11 +242,114 @@ def draw_summary_panel(ax, df, col, ylabel, ylim, panel_id, title,
             fontsize=10, fontweight='bold', va='bottom', ha='left')
 
 
+def build_cohort_legend(fig, loc='upper center'):
+    handles = [
+        Line2D([0], [0], marker='o', linestyle='none',
+               markerfacecolor=COLORS[c], markeredgecolor='white',
+               markeredgewidth=0.7, markersize=6,
+               label=COHORT_TITLES[c])
+        for c in COHORT_ORDER
+    ]
+    return fig.legend(handles=handles, loc=loc, ncol=len(COHORT_ORDER),
+                      frameon=False, bbox_to_anchor=(0.5, 0.992),
+                      handletextpad=0.45, columnspacing=1.25,
+                      borderaxespad=0.0)
+
+
+# %% ─── STATISTICS ──────────────────────────────────────────────────────────
+# Mann-Whitney U (two-sided, non-parametric) with rank-biserial effect size
+# and BH-FDR adjustment over the three cohort pairs, computed per metric.
+# Expected pattern for Figure 5:
+#   Full vs No conation       : n.s.  (both retain residue)
+#   Full vs No body→g         : ***   (body→g routing is required)
+#   No conation vs No body→g  : ***
+
+COHORT_DISPLAY = {'full': 'Full', 'no_conative': 'No conation',
+                  'no_body_in_g': 'No body→g'}
+
+
+def _mannwhitney_with_effect(a, b):
+    a = np.asarray(a, dtype=float); a = a[~np.isnan(a)]
+    b = np.asarray(b, dtype=float); b = b[~np.isnan(b)]
+    n1, n2 = len(a), len(b)
+    if n1 == 0 or n2 == 0:
+        return dict(U=np.nan, p=np.nan, r=np.nan, n1=n1, n2=n2)
+    U, p = stats.mannwhitneyu(a, b, alternative='two-sided')
+    r = 1.0 - 2.0 * U / (n1 * n2)
+    return dict(U=U, p=p, r=r, n1=n1, n2=n2)
+
+
+def _bh_fdr(pvals):
+    p = np.asarray(pvals, dtype=float)
+    n = len(p)
+    order = np.argsort(p)
+    ranks = np.argsort(order) + 1
+    p_sorted = p[order]
+    p_adj_sorted = np.minimum.accumulate(
+        (p_sorted * n / np.arange(1, n + 1))[::-1])[::-1]
+    p_adj_sorted = np.minimum(p_adj_sorted, 1.0)
+    return p_adj_sorted[ranks - 1]
+
+
+def _stars(p):
+    if np.isnan(p):  return ""
+    if p < 0.001:    return "***"
+    if p < 0.01:     return "**"
+    if p < 0.05:     return "*"
+    return "n.s."
+
+
+def _fmt_p(p):
+    if np.isnan(p): return "  n/a"
+    if p < 0.001:   return "<.001"
+    return f"{p:.3f}"
+
+
+def print_metric_stats(df, value_col, label):
+    print(f"\n  [{label}]  ({value_col})")
+    print(f"    {'cohort':<14s} {'n':>3s}  {'median':>9s}  {'IQR':>20s}")
+    for c in COHORT_ORDER:
+        v = df[df['cohort'] == c][value_col].dropna().to_numpy()
+        med = np.median(v); q25, q75 = np.quantile(v, [0.25, 0.75])
+        iqr_str = f"[{q25:.3f}, {q75:.3f}]"
+        print(f"    {COHORT_DISPLAY[c]:<14s} {len(v):>3d}  {med:>9.3f}  {iqr_str:>20s}")
+    pairs = list(combinations(COHORT_ORDER, 2))
+    results = []
+    for a, b in pairs:
+        ga = df[df['cohort'] == a][value_col].to_numpy()
+        gb = df[df['cohort'] == b][value_col].to_numpy()
+        res = _mannwhitney_with_effect(ga, gb)
+        res['pair'] = (a, b)
+        results.append(res)
+    p_adj = _bh_fdr([r['p'] for r in results])
+    print(f"    {'pair':<32s} {'U':>7s}  {'p_raw':>6s}  {'p_adj':>6s}  "
+          f"{'r_rb':>6s}  sig")
+    for r, padj in zip(results, p_adj):
+        a, b = r['pair']
+        pair_str = f"{COHORT_DISPLAY[a]} vs {COHORT_DISPLAY[b]}"
+        sig = _stars(padj)
+        print(f"    {pair_str:<32s} {r['U']:>7.1f}  "
+              f"{_fmt_p(r['p']):>6s}  {_fmt_p(padj):>6s}  "
+              f"{r['r']:>+6.2f}  {sig}")
+
+
+def print_stats_report(df, metrics, title="Statistics report"):
+    print("\n" + "=" * 70)
+    print(title)
+    print("=" * 70)
+    print("  Test: Mann-Whitney U (two-sided), with BH-FDR correction.")
+    print("  Effect size: rank-biserial r = 1 − 2U/(n1·n2), range [−1, +1].")
+    print("  Sign of r: positive when the first cohort tends to exceed the second.")
+    for col, label in metrics:
+        print_metric_stats(df, col, label)
+    print()
+
+
 # %% ─── RUN ─────────────────────────────────────────────────────────────────
 
-fig = plt.figure(figsize=(8.5, 5.6))
-gs = fig.add_gridspec(2, 3, hspace=0.45, wspace=0.30,
-                      height_ratios=[1.3, 1.0])
+fig = plt.figure(figsize=(8.8, 5.45))
+gs = fig.add_gridspec(2, 3, hspace=0.48, wspace=0.34,
+                      height_ratios=[1.28, 1.0])
 
 # Top row: displacement fan
 for j, cohort in enumerate(COHORT_ORDER):
@@ -273,27 +357,39 @@ for j, cohort in enumerate(COHORT_ORDER):
     draw_displacement_fan(ax, disp_df, cohort, f"({chr(ord('a')+j)})",
                           show_radius_labels=(j == 0))
     if j == 0:
-        ax.set_ylabel(r"$\Delta$PC2", fontsize=8.5)
+        ax.set_ylabel(r"$\Delta$PC2", fontsize=8.5, labelpad=1)
 
-# Bottom row: summaries
+# Bottom row: geometry summaries
 ax_d = fig.add_subplot(gs[1, 0])
-draw_summary_panel(ax_d, df_diff, "shock_minus_control.body_u",
-                   r"$\Delta\, u^{\mathrm{body}}$",
-                   (-1.6, 0.1), '(d)', "Shock magnitude (body)")
+draw_summary_panel(ax_d, summary_df, "g_distance",
+                   "g distance", (0, 2.6), '(d)',
+                   "Perspective displacement", zero_ref=False,
+                   panel_x=-0.13)
 
 ax_e = fig.add_subplot(gs[1, 1])
-draw_summary_panel(ax_e, centroid_df, "centroid_dist_3d",
-                   r"$\Vert \bar g^{\mathrm{shock}}_{1:3} - \bar g^{\mathrm{ctrl}}_{1:3} \Vert$",
-                   (0, 0.8), '(e)', "PC centroid distance",
-                   zero_ref=False)
+draw_summary_panel(ax_e, summary_df, "metric_spectrum_distance",
+                   "spectrum distance", (0, 3.0), '(e)',
+                   "Metric spectrum distance", zero_ref=False,
+                   panel_x=-0.13)
 
 ax_f = fig.add_subplot(gs[1, 2])
-draw_summary_panel(ax_f, spec_df, "spectral_l2",
-                   r"$\Vert \lambda^{\mathrm{shock}} - \lambda^{\mathrm{ctrl}} \Vert_2$",
-                   (0, 3.0), '(f)', "Metric spectral L2",
-                   zero_ref=False)
+draw_summary_panel(ax_f, summary_df, "metric_anisotropy_distance",
+                   "anisotropy distance", (0, 2.2), '(f)',
+                   "Metric anisotropy", zero_ref=False,
+                   panel_x=-0.13)
 
+build_cohort_legend(fig)
+
+plt.tight_layout()
+plt.subplots_adjust(top=0.88, left=0.065, right=0.99)
 plt.show()
+
+# Statistics — printed to console, not on figure.
+print_stats_report(summary_df, [
+    ("g_distance",                 "Perspective g distance (3D centroid)"),
+    ("metric_spectrum_distance",   "Metric spectrum distance (eigenvalue L2)"),
+    ("metric_anisotropy_distance", "Metric anisotropy distance"),
+], title="Figure 5 — Body perturbation geometry")
 
 
 # %% ─── SAVE ────────────────────────────────────────────────────────────────
