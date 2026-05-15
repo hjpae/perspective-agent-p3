@@ -176,7 +176,7 @@ def draw_behavior_panel(ax, df, col, title, ylim, panel_id=None, ylabel=None,
         ax.set_ylabel(ylabel)
     if panel_id is not None:
         ax.text(-0.16, 1.05, panel_id, transform=ax.transAxes,
-                fontsize=10, fontweight='bold', va='bottom', ha='left')
+                fontsize=10, fontweight='bold', va='bottom', ha='right')
 
 
 def add_axis_break_marks(ax_top, ax_bottom, d=0.010, lw=0.8):
@@ -227,6 +227,75 @@ def _binned_summary(g, x_col, y_col):
     return pd.DataFrame(rows).sort_values('x_med')
 
 
+
+
+def _fig_bh_fdr(pvals):
+    """Benjamini-Hochberg adjusted p-values for compact in-panel stats."""
+    p = np.asarray(pvals, dtype=float)
+    n = len(p)
+    if n == 0:
+        return p
+    order = np.argsort(p)
+    ranked = p[order]
+    adj_sorted = np.empty(n, dtype=float)
+    running = 1.0
+    for i in range(n - 1, -1, -1):
+        rank = i + 1
+        running = min(running, ranked[i] * n / rank)
+        adj_sorted[i] = running
+    adj = np.empty(n, dtype=float)
+    adj[order] = np.clip(adj_sorted, 0, 1)
+    return adj
+
+
+def _fig_sig_marker(p):
+    if not np.isfinite(p):
+        return ""
+    if p < 0.001:
+        return "***"
+    if p < 0.01:
+        return "**"
+    if p < 0.05:
+        return "*"
+    return "n.s."
+
+
+def _seed_spearman_summary(df, x_col, y_col):
+    """Return compact median seed-level Spearman rho and BH-adjusted p."""
+    rows = []
+    raw_p = []
+    for cohort in COHORT_ORDER:
+        rhos = []
+        g_cohort = df[df['cohort'] == cohort]
+        if 'seed' not in g_cohort.columns:
+            continue
+        for _, g_seed in g_cohort.groupby('seed'):
+            x = g_seed[x_col].to_numpy(dtype=float)
+            y = g_seed[y_col].to_numpy(dtype=float)
+            m = np.isfinite(x) & np.isfinite(y)
+            x, y = x[m], y[m]
+            if len(x) >= 3 and np.nanstd(x) > 1e-12 and np.nanstd(y) > 1e-12:
+                rho, _ = stats.spearmanr(x, y)
+                if np.isfinite(rho):
+                    rhos.append(float(rho))
+        rhos = np.asarray(rhos, dtype=float)
+        if len(rhos) == 0:
+            med, p = np.nan, np.nan
+        elif np.allclose(rhos, 0.0):
+            med, p = float(np.median(rhos)), 1.0
+        else:
+            med = float(np.median(rhos))
+            try:
+                p = float(stats.wilcoxon(rhos, alternative='two-sided', zero_method='wilcox').pvalue)
+            except ValueError:
+                p = np.nan
+        rows.append({'cohort': cohort, 'rho_med': med, 'p_raw': p})
+        raw_p.append(p if np.isfinite(p) else 1.0)
+    p_adj = _fig_bh_fdr(raw_p)
+    for row, pa in zip(rows, p_adj):
+        row['p_adj'] = float(pa)
+    return rows
+
 def draw_tendency_calibration_panel(
     ax,
     df,
@@ -238,6 +307,7 @@ def draw_tendency_calibration_panel(
 ):
     """Binned predicted-vs-ground-truth tendency calibration panel."""
     d = make_true_tendency_bins(df, x_col=x_col, n_bins=n_bins)
+    stat_rows = _seed_spearman_summary(df, x_col=x_col, y_col=y_col)
 
     lo = min(xlim[0], ylim[0])
     hi = max(xlim[1], ylim[1])
@@ -259,7 +329,33 @@ def draw_tendency_calibration_panel(
             x, y, yerr=yerr,
             color=COLORS[cohort], marker='o', markersize=4.0,
             linewidth=1.25, elinewidth=0.85, capsize=2.2,
-            label=COHORT_LABELS[cohort], zorder=3,
+            zorder=3,
+        )
+
+    stat_lines = []
+    for row in stat_rows:
+        cohort = row['cohort']
+        rho = row['rho_med']
+        pa = row['p_adj']
+        if np.isfinite(rho):
+            stat_lines.append(
+                f"{COHORT_LABELS[cohort]} "
+                rf"$\rho_s$={rho:.2f}{_fig_sig_marker(pa)}"
+            )
+    if stat_lines:
+        ax.text(
+            0.05, 0.96,
+            "\n".join(stat_lines),
+            transform=ax.transAxes,
+            ha='left', va='top',
+            fontsize=5.9, linespacing=1.12,
+            bbox=dict(
+                boxstyle='round,pad=0.16',
+                facecolor='white',
+                edgecolor='none',
+                alpha=0.74,
+            ),
+            zorder=10,
         )
 
     ax.axhline(0, color='gray', linewidth=0.6, linestyle='--', alpha=0.45, zorder=0)
@@ -271,6 +367,27 @@ def draw_tendency_calibration_panel(
     ax.set_title('Learned bodily tendency field', pad=4)
     ax.grid(alpha=0.22, linestyle=':', linewidth=0.5)
     ax.set_axisbelow(True)
+
+    # Keep the calibration reference legend. Cohort identity is handled by
+    # the global legend, and cohort-level calibration statistics are shown
+    # in the compact inset above.
+    yx_handle = Line2D(
+        [0], [0],
+        color='black',
+        linestyle='--',
+        linewidth=0.9,
+        label='y=x',
+    )
+    ax.legend(
+        handles=[yx_handle],
+        loc='lower right',
+        frameon=False,
+        fontsize=6.7,
+        handlelength=2.4,
+        handletextpad=0.35,
+        borderaxespad=0.25,
+    )
+
     ax.text(-0.13, 1.05, '(c)', transform=ax.transAxes,
             fontsize=10, fontweight='bold', va='bottom', ha='left')
 
@@ -381,19 +498,10 @@ def make_figure(df_b, df_t):
     draw_tendency_calibration_panel(ax_c, df_t)
     draw_action_panel(ax_d, df_b)
 
-    # Panel-specific tiny legends only where useful.
-    cal_handles = [Line2D([0], [0], marker='o', linestyle='None',
-                          color=COLORS[c], markersize=4.2,
-                          label=COHORT_LABELS[c])
-                   for c in COHORT_ORDER]
-    cal_handles.append(Line2D([0], [0], color='black', linestyle='--',
-                              linewidth=0.9, label='y=x'))
-    ax_c.legend(handles=cal_handles, loc='lower right', frameon=False,
-                fontsize=6.7, handletextpad=0.38, labelspacing=0.28,
-                borderaxespad=0.25)
-
+    # Panel (c) carries compact seed-level calibration statistics in-panel.
     add_compact_legend(fig, y=0.994)
     plt.subplots_adjust(top=0.925, bottom=0.095, left=0.075, right=0.985)
+    #plt.subplots_adjust(top=0.955, bottom=0.095, left=0.075, right=0.985)
     return fig
 
 

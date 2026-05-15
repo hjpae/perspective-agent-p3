@@ -1,19 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 Paper Figure: Body perturbation leaves perspective-geometric residue.
-Combined 6-panel version for SAB/LNCS paper.
+Non-redundant 3x2 version for SAB/LNCS paper.
 
 Panels
 ------
 (a-c) PCA displacement fans in recovery-phase perspective space:
       shock-history centroid minus control-history centroid, per seed.
-(d)   3D PC centroid distance, summarizing panels (a-c).
-(e)   Perturbation-assay metric spectrum distance, computed from the
-      Fisher-style M_g eigenvalue spectra in control vs body-shock rollouts.
-(f)   Same-state history-g metric spectrum distance: identical probe inputs
-      are processed with control-history vs shock-history g. This controls
-      trajectory/input differences and tests whether the history carried by g
-      reorganizes the same input.
+      No mean arrow is drawn; each arrow is one seed.
+(d)   Metric-geometry separation in the same-state history-g probe,
+      measured as metric-spectrum distance under identical probe inputs.
+(e)   Seed-level coupling between recovery-phase PCA displacement and
+      same-state metric-geometry separation.
+(f)   Time-resolved recovery trajectory of shock-control separation in g
+      after the perturbation window has ceased.
 
 Inputs expected under project root:
   outputs/p3_v3_assay_geometry/assay_g_pca_points.csv
@@ -47,17 +47,16 @@ INPUT_PHASE_DIFF = "outputs/p3_v3_assay_geometry/body_shock_control_phase_diff.c
 INPUT_SAME_STATE = "outputs/p3_v3_same_state_probe/same_state_history_probe_shock_control_diff_recovery_mean.csv"
 
 OUTDIR = "./figures"
-NAME = "figure_geometry_body_to_g_combined_6panel"
+NAME = "figure_geometry_body_to_g_nonredundant_6panel"
 FORMATS = ["pdf", "png"]
 
 PHASE = "recovery"
+RECOVERY_START_T = 80
 N_EIG = 20
 
-# Visual axis ranges; adjust if your local figure needs a little more room.
 PCA_XLIM = (-2.0, 2.0)
 PCA_YLIM = (-2.0, 2.0)
-CENTROID_YLIM = (0.0, 0.85)
-PERTURB_SPEC_YLIM = (0.0, 3.0)
+TRAJ_YLIM = (0.0, 0.8)
 SAME_STATE_SPEC_YLIM = (0.003, 30.0)  # log scale
 
 
@@ -71,7 +70,7 @@ mpl.rcParams.update({
     "axes.titlesize": 9.5,
     "xtick.labelsize": 8,
     "ytick.labelsize": 8,
-    "legend.fontsize": 8,
+    "legend.fontsize": 7.5,
     "figure.dpi": 150,
     "savefig.dpi": 300,
     "axes.spines.top": False,
@@ -197,6 +196,22 @@ def print_pairwise_mwu(df: pd.DataFrame, col: str, title: str) -> None:
         print(f"    {pair:33s} {u:8.1f} {fmt_p(p):>7s} {fmt_p(pa):>7s} {r:+7.2f} {sig_marker(pa):>4s}")
 
 
+def print_spearman(x: np.ndarray, y: np.ndarray, label: str) -> None:
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    x = x[mask]
+    y = y[mask]
+    print("\n" + "=" * 70)
+    print(label)
+    print("=" * 70)
+    if len(x) < 3:
+        print("  Not enough points for Spearman correlation.")
+        return
+    rho, p = stats.spearmanr(x, y)
+    print(f"  Spearman rho = {rho:+.3f}, p = {fmt_p(float(p))}, n = {len(x)}")
+
+
 # %% ─── LOAD DATA ───────────────────────────────────────────────────────────
 
 path_pca = resolve_path(INPUT_PCA)
@@ -204,8 +219,8 @@ path_geom = resolve_path(INPUT_PHASE_GEOMETRY)
 path_diff = resolve_path(INPUT_PHASE_DIFF)
 path_same = resolve_path(INPUT_SAME_STATE)
 
-pca = pd.read_csv(path_pca)
-pca = pca[pca["phase"] == PHASE].copy()
+pca_all = pd.read_csv(path_pca)
+pca = pca_all[pca_all["phase"] == PHASE].copy()
 
 geom = pd.read_csv(path_geom)
 geom = geom[geom["phase"] == PHASE].copy()
@@ -215,7 +230,7 @@ phase_diff = phase_diff[phase_diff["phase"] == PHASE].copy()
 
 same_raw = pd.read_csv(path_same)
 
-print(f"Loaded PCA points       : {len(pca)} rows from {path_pca}")
+print(f"Loaded PCA points       : {len(pca_all)} rows from {path_pca}")
 print(f"Loaded phase geometry   : {len(geom)} rows from {path_geom}")
 print(f"Loaded phase diff       : {len(phase_diff)} rows from {path_diff}")
 print(f"Loaded same-state probe : {len(same_raw)} rows from {path_same}")
@@ -241,37 +256,28 @@ def per_seed_pc2_displacement(df_pca: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def per_seed_pc_centroid_dist(df_pca: pd.DataFrame) -> pd.DataFrame:
-    rows = []
+def per_seed_recovery_trajectory(df_pca_all: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return time-resolved shock-control distance and per-seed summary.
+
+    Uses PC1-PC3 distance at matched recovery timesteps. The per-seed summary
+    is the mean recovery distance across recovery timesteps, used for stats.
+    """
+    d = df_pca_all[df_pca_all["phase"] == PHASE].copy()
     cols = ["PC1", "PC2", "PC3"]
-    for (cohort, seed), g in df_pca.groupby(["cohort", "seed"]):
-        ctrl = g[g["condition"] == "control"][cols].mean().to_numpy(dtype=float)
-        shock = g[g["condition"] == "body_shock"][cols].mean().to_numpy(dtype=float)
-        if np.any(~np.isfinite(ctrl)) or np.any(~np.isfinite(shock)):
-            continue
-        rows.append({
-            "cohort": cohort, "seed": seed,
-            "centroid_dist_3d": float(np.linalg.norm(shock - ctrl)),
-        })
-    return pd.DataFrame(rows)
-
-
-def per_seed_perturb_metric_spectral_l2(df_geom: pd.DataFrame, n_eig: int = N_EIG) -> pd.DataFrame:
-    eig_cols = [f"M_g_eig_{i}" for i in range(n_eig)]
-    missing = [c for c in eig_cols if c not in df_geom.columns]
-    if missing:
-        raise KeyError(f"Missing eigen columns in phase geometry: {missing[:5]}...")
-    rows = []
-    for (cohort, seed), g in df_geom.groupby(["cohort", "seed"]):
-        ctrl = g[g["condition"] == "control"][eig_cols].mean().to_numpy(dtype=float)
-        shock = g[g["condition"] == "body_shock"][eig_cols].mean().to_numpy(dtype=float)
-        if np.any(~np.isfinite(ctrl)) or np.any(~np.isfinite(shock)):
-            continue
-        rows.append({
-            "cohort": cohort, "seed": seed,
-            "perturb_metric_spectral_l2": float(np.linalg.norm(np.sort(shock)[::-1] - np.sort(ctrl)[::-1])),
-        })
-    return pd.DataFrame(rows)
+    ctrl = d[d["condition"] == "control"][["cohort", "seed", "t"] + cols].copy()
+    shock = d[d["condition"] == "body_shock"][["cohort", "seed", "t"] + cols].copy()
+    m = pd.merge(ctrl, shock, on=["cohort", "seed", "t"], suffixes=("_ctrl", "_shock"))
+    if m.empty:
+        raise ValueError("No matched control/body_shock PCA rows found for recovery trajectory.")
+    diff = np.column_stack([
+        m[f"{c}_shock"].to_numpy(dtype=float) - m[f"{c}_ctrl"].to_numpy(dtype=float)
+        for c in cols
+    ])
+    m["pc3_shock_control_dist"] = np.sqrt((diff ** 2).sum(axis=1))
+    m["t_rel"] = m["t"] - int(RECOVERY_START_T)
+    auc = m.groupby(["cohort", "seed"], as_index=False)["pc3_shock_control_dist"].mean()
+    auc = auc.rename(columns={"pc3_shock_control_dist": "recovery_mean_pc3_distance"})
+    return m, auc
 
 
 def per_seed_same_state_metric_spectrum(df_same: pd.DataFrame, n_eig: int = N_EIG) -> pd.DataFrame:
@@ -287,9 +293,16 @@ def per_seed_same_state_metric_spectrum(df_same: pd.DataFrame, n_eig: int = N_EI
 
 
 disp_df = per_seed_pc2_displacement(pca)
-centroid_df = per_seed_pc_centroid_dist(pca)
-perturb_spec_df = per_seed_perturb_metric_spectral_l2(geom)
+traj_df, traj_seed_df = per_seed_recovery_trajectory(pca_all)
 same_spec_df = per_seed_same_state_metric_spectrum(same_raw)
+
+# Scatter coupling table.
+coupling_df = pd.merge(
+    disp_df[["cohort", "seed", "pc2_vector_norm"]],
+    same_spec_df[["cohort", "seed", "same_state_metric_spectrum_distance"]],
+    on=["cohort", "seed"],
+    how="inner",
+)
 
 # Optional sanity check: shock magnitude is matched across cohorts.
 if "shock_minus_control.body_u" in phase_diff.columns:
@@ -312,8 +325,6 @@ def draw_displacement_fan(
     arrow_alpha=0.55,
     arrow_lw=1.05,
     tip_size=18,
-    mean_arrow_lw=2.5,
-    mean_arrow_mut=18,
 ):
     for r in ref_radii:
         circ = plt.Circle((0, 0), r, fill=False, color="gray",
@@ -334,12 +345,7 @@ def draw_displacement_fan(
         ax.scatter(dx, dy, s=tip_size, color=COLORS[cohort], alpha=0.75,
                    edgecolor="white", linewidth=0.4, marker="X", zorder=4)
 
-    if len(arr) > 0:
-        mean = arr.mean(axis=0)
-        ax.annotate("", xy=tuple(mean), xytext=(0, 0),
-                    arrowprops=dict(arrowstyle="-|>", color="black",
-                                    lw=mean_arrow_lw, shrinkA=0, shrinkB=0,
-                                    mutation_scale=mean_arrow_mut), zorder=10)
+    # No mean arrow: each arrow is one seed-level displacement vector.
     ax.scatter(0, 0, s=45, color="white", edgecolor="black",
                linewidth=1.2, marker="o", zorder=11)
 
@@ -354,7 +360,27 @@ def draw_displacement_fan(
             fontsize=10, fontweight="bold", va="bottom", ha="left")
 
 
-def draw_summary_panel(
+def draw_recovery_trajectory(ax, traj: pd.DataFrame, panel_id: str):
+    for cohort in COHORT_ORDER:
+        sub = traj[traj["cohort"] == cohort].copy()
+        q = sub.groupby("t_rel")["pc3_shock_control_dist"].quantile([0.25, 0.5, 0.75]).unstack()
+        q = q.sort_index()
+        x = q.index.to_numpy(dtype=float)
+        med = q[0.5].to_numpy(dtype=float)
+        lo = q[0.25].to_numpy(dtype=float)
+        hi = q[0.75].to_numpy(dtype=float)
+        ax.plot(x, med, color=COLORS[cohort], lw=1.9)
+        ax.fill_between(x, lo, hi, color=COLORS[cohort], alpha=0.12, linewidth=0)
+    ax.set_title("Recovery trajectory", fontsize=9.0, pad=4)
+    ax.set_xlabel("Recovery timestep")
+    ax.set_ylabel(r"Shock--control distance in $g$")
+    ax.set_ylim(*TRAJ_YLIM)
+    ax.grid(axis="y", alpha=0.22, linestyle=":", linewidth=0.5)
+    ax.text(-0.17, 1.05, panel_id, transform=ax.transAxes,
+            fontsize=10, fontweight="bold", va="bottom", ha="left")
+
+
+def draw_seed_bar_panel(
     ax,
     df: pd.DataFrame,
     col: str,
@@ -363,56 +389,144 @@ def draw_summary_panel(
     panel_id: str,
     ylim=None,
     log_y=False,
-    zero_ref=False,
-    box_width=0.46,
-    dot_jitter=0.13,
-    dot_size=10,
-    dot_alpha=0.45,
-    box_alpha=0.22,
-    median_lw=2.35,
     jitter_seed=42,
-    panel_x=-0.20,
 ):
+    """Fig-3 style bar panel: IQR box + median line + seed dots."""
     rng = np.random.default_rng(jitter_seed)
+    bar_w = 0.48
+    x_centers = np.arange(len(COHORT_ORDER), dtype=float)
+
     for i, cohort in enumerate(COHORT_ORDER):
         vals = df[df["cohort"] == cohort][col].dropna().to_numpy(dtype=float)
         if len(vals) == 0:
             continue
         med = np.median(vals)
         q25, q75 = np.quantile(vals, [0.25, 0.75])
-        ax.bar(i, q75 - q25, bottom=q25, width=box_width,
-               color=COLORS[cohort], alpha=box_alpha,
-               edgecolor=COLORS[cohort], linewidth=1.0, zorder=2)
-        ax.hlines(med, i - box_width / 2, i + box_width / 2,
-                  colors=COLORS[cohort], linewidth=median_lw, zorder=4)
-        xs = i + rng.uniform(-dot_jitter, dot_jitter, size=len(vals))
-        ax.scatter(xs, vals, s=dot_size, color=COLORS[cohort],
-                   alpha=dot_alpha, edgecolor="none", zorder=3)
+        x_off = x_centers[i]
 
-    if zero_ref:
-        ax.axhline(0, color="gray", linewidth=0.6, linestyle="--", alpha=0.5)
+        # IQR box.
+        ax.bar(x_off, q75 - q25, bottom=q25, width=bar_w,
+               color=COLORS[cohort], alpha=0.28,
+               edgecolor=COLORS[cohort], linewidth=0.9, zorder=2)
+        # Median line.
+        ax.hlines(med, x_off - bar_w * 0.48, x_off + bar_w * 0.48,
+                  colors=COLORS[cohort], linewidth=2.0, zorder=4)
+        # Jittered seed points.
+        xs = x_off + rng.uniform(-bar_w * 0.28, bar_w * 0.28, size=len(vals))
+        ax.scatter(xs, vals, s=10, color=COLORS[cohort], alpha=0.36,
+                   edgecolor='none', zorder=3)
+
     if log_y:
         ax.set_yscale("log")
     if ylim is not None:
         ax.set_ylim(*ylim)
-    ax.set_xticks(range(len(COHORT_ORDER)))
+    ax.set_xticks(x_centers)
     ax.set_xticklabels([COHORT_LABELS_2L[c] for c in COHORT_ORDER], fontsize=8)
     ax.set_ylabel(ylabel)
-    ax.set_title(title, fontsize=9.5, pad=4)
+    ax.set_title(title, fontsize=8.8, pad=4)
     ax.grid(axis="y", alpha=0.22, linestyle=":", linewidth=0.5, which="both")
     ax.set_axisbelow(True)
-    ax.text(panel_x, 1.05, panel_id, transform=ax.transAxes,
+    ax.text(-0.17, 1.05, panel_id, transform=ax.transAxes,
             fontsize=10, fontweight="bold", va="bottom", ha="left")
 
+def draw_coupling_scatter(ax, df: pd.DataFrame, panel_id: str):
+    stat_lines = []
+
+    for cohort in COHORT_ORDER:
+        sub = df[df["cohort"] == cohort].copy()
+
+        x = sub["pc2_vector_norm"].to_numpy(dtype=float)
+        y = sub["same_state_metric_spectrum_distance"].to_numpy(dtype=float)
+
+        mask = np.isfinite(x) & np.isfinite(y) & (y > 0)
+        x = x[mask]
+        y = y[mask]
+
+        # Scatter points
+        ax.scatter(
+            x,
+            y,
+            s=24,
+            color=COLORS[cohort],
+            alpha=0.42,
+            edgecolor="white",
+            linewidth=0.35,
+            zorder=3,
+        )
+
+        # Within-cohort Spearman correlation, shown compactly
+        if len(x) >= 3:
+            rho, p = stats.spearmanr(x, y)
+            stat_lines.append(
+                f"{COHORT_TITLES[cohort]} "
+                rf"$\rho_s$={rho:+.2f}{sig_marker(float(p))}"
+            )
+
+        # Cohort-wise trend line in log-y space
+        if len(x) >= 3 and np.nanstd(x) > 0:
+            logy = np.log10(y)
+
+            X = np.column_stack([np.ones_like(x), x])
+            beta, *_ = np.linalg.lstsq(X, logy, rcond=None)
+
+            xg = np.linspace(np.min(x), np.max(x), 100)
+            Xg = np.column_stack([np.ones_like(xg), xg])
+            yhat = 10 ** (Xg @ beta)
+
+            ax.plot(
+                xg,
+                yhat,
+                color=COLORS[cohort],
+                linewidth=1.55,
+                alpha=0.92,
+                zorder=2,
+            )
+
+    # Small compact inset: rho + significance stars only
+    if stat_lines:
+        ax.text(
+            0.96,
+            0.04,
+            "\n".join(stat_lines),
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=5.8,
+            linespacing=1.15,
+            bbox=dict(
+                boxstyle="round,pad=0.16",
+                facecolor="white",
+                edgecolor="none",
+                alpha=0.72,
+            ),
+        )
+
+    ax.set_title("PCA-metric correlation", fontsize=8.8, pad=4)
+    ax.set_xlabel(r"PCA displacement norm")
+    ax.set_ylabel(r"Metric-spectrum distance")
+    ax.set_yscale("log")
+    ax.set_ylim(*SAME_STATE_SPEC_YLIM)
+    ax.grid(axis="both", alpha=0.18, linestyle=":", linewidth=0.5, which="both")
+    ax.set_axisbelow(True)
+    ax.text(
+        -0.17,
+        1.05,
+        panel_id,
+        transform=ax.transAxes,
+        fontsize=10,
+        fontweight="bold",
+        va="bottom",
+        ha="left",
+    )
 
 # %% ─── FIGURE ──────────────────────────────────────────────────────────────
 
-fig = plt.figure(figsize=(8.5, 5.7))
+fig = plt.figure(figsize=(8.5, 5.85))
 gs = fig.add_gridspec(
     2, 3,
     hspace=0.45,
     wspace=0.34,
-    height_ratios=[1.22, 1.0],
+    height_ratios=[1.12, 0.95],
 )
 
 # Top row: PCA displacement fans.
@@ -423,40 +537,45 @@ for j, cohort in enumerate(COHORT_ORDER):
     if j == 0:
         ax.set_ylabel(r"$\Delta$PC2", fontsize=8.5)
 
-# Bottom row: scalar summaries.
-ax_d = fig.add_subplot(gs[1, 0])
-draw_summary_panel(
-    ax_d, centroid_df, "centroid_dist_3d",
-    ylabel=r"PC centroid distance",
-    title="Recovery displacement",
+# Bottom row: same-state geometry, cross-metric coupling, and temporal recovery.
+# Visual order is unchanged; only panel labels are corrected to (d) - (e) - (f).
+
+ax_e = fig.add_subplot(gs[1, 0])
+draw_seed_bar_panel(
+    ax_e,
+    same_spec_df,
+    "same_state_metric_spectrum_distance",
+    ylabel=r"Metric-spectrum distance",
+    title="Metric-geometry separation",
     panel_id="(d)",
-    ylim=CENTROID_YLIM,
-    zero_ref=False,
-)
-
-ax_e = fig.add_subplot(gs[1, 1])
-draw_summary_panel(
-    ax_e, perturb_spec_df, "perturb_metric_spectral_l2",
-    ylabel=r"Metric-spectrum distance",
-    title="Perturbation metric shift",
-    panel_id="(e)",
-    ylim=PERTURB_SPEC_YLIM,
-    zero_ref=False,
-)
-
-ax_f = fig.add_subplot(gs[1, 2])
-draw_summary_panel(
-    ax_f, same_spec_df, "same_state_metric_spectrum_distance",
-    ylabel=r"Metric-spectrum distance",
-    title="Same-state history-$g$ probe",
-    panel_id="(f)",
     ylim=SAME_STATE_SPEC_YLIM,
     log_y=True,
-    zero_ref=False,
 )
 
-plt.show()
+ax_f = fig.add_subplot(gs[1, 1])
+draw_coupling_scatter(ax_f, coupling_df, "(e)")
 
+ax_d = fig.add_subplot(gs[1, 2])
+draw_recovery_trajectory(ax_d, traj_df, "(f)")
+
+legend_handles = [
+    mpl.lines.Line2D([0], [0], color=COLORS[c], lw=2.2, label=COHORT_TITLES[c])
+    for c in COHORT_ORDER
+]
+fig.legend(
+    handles=legend_handles,
+    loc="upper center",
+    ncol=3,
+    frameon=False,
+    bbox_to_anchor=(0.5, 0.90),
+    columnspacing=1.4,
+    handlelength=2.0,
+    borderaxespad=0.2,
+)
+
+fig.subplots_adjust(top=0.82)
+
+plt.show()
 
 # %% ─── SAVE ────────────────────────────────────────────────────────────────
 
@@ -471,32 +590,38 @@ for fmt in FORMATS:
 # %% ─── STATISTICS ──────────────────────────────────────────────────────────
 
 print("\n" + "#" * 70)
-print("COMBINED GEOMETRY FIGURE STATISTICS")
+print("NON-REDUNDANT GEOMETRY FIGURE STATISTICS")
 print("#" * 70)
 
-# Top-row displacement in 2D PC space; useful for panel (a-c) qualitative read.
 print_pairwise_mwu(
     disp_df,
     "pc2_vector_norm",
-    "Panels 2a-c — PCA displacement vector norm in PC1-PC2",
+    "Panels 3a-c — PCA displacement vector norm in PC1-PC2",
 )
 
 print_pairwise_mwu(
-    centroid_df,
-    "centroid_dist_3d",
-    "Panel 2d — 3D PC centroid distance, shock vs control",
-)
-
-print_pairwise_mwu(
-    perturb_spec_df,
-    "perturb_metric_spectral_l2",
-    "Panel 2e — Perturbation-assay metric-spectrum distance",
+    traj_seed_df,
+    "recovery_mean_pc3_distance",
+    "Panel 3f — Mean recovery shock-control distance in g",
 )
 
 print_pairwise_mwu(
     same_spec_df,
     "same_state_metric_spectrum_distance",
-    "Panel 2f — Same-state history-g metric-spectrum distance",
+    "Panel 3d — Metric-geometry separation",
+)
+
+print_spearman(
+    coupling_df["pc2_vector_norm"].to_numpy(dtype=float),
+    coupling_df["same_state_metric_spectrum_distance"].to_numpy(dtype=float),
+    "Panel 3e — Coupling between PCA displacement and metric-geometry separation (all seeds)",
+)
+
+body_to_g = coupling_df[coupling_df["cohort"].isin(["full", "no_conative"])]
+print_spearman(
+    body_to_g["pc2_vector_norm"].to_numpy(dtype=float),
+    body_to_g["same_state_metric_spectrum_distance"].to_numpy(dtype=float),
+    "Panel 3e — Coupling within body→g cohorts only",
 )
 
 if not shock_body_df.empty:
@@ -507,16 +632,19 @@ if not shock_body_df.empty:
     )
 
 # Save the derived per-seed tables for reproducibility.
-centroid_out = outdir / f"{NAME}_panel_d_centroid_dist.csv"
-perturb_out = outdir / f"{NAME}_panel_e_perturb_metric_spectral_l2.csv"
-same_out = outdir / f"{NAME}_panel_f_same_state_metric_spectrum.csv"
 disp_out = outdir / f"{NAME}_panels_abc_pc2_displacement.csv"
+same_out = outdir / f"{NAME}_panel_d_metric_geometry_separation.csv"
+coupling_out = outdir / f"{NAME}_panel_e_coupling.csv"
+traj_out = outdir / f"{NAME}_panel_f_recovery_trajectory.csv"
+traj_seed_out = outdir / f"{NAME}_panel_f_recovery_mean_distance.csv"
 
 disp_df.to_csv(disp_out, index=False)
-centroid_df.to_csv(centroid_out, index=False)
-perturb_spec_df.to_csv(perturb_out, index=False)
+traj_df.to_csv(traj_out, index=False)
+traj_seed_df.to_csv(traj_seed_out, index=False)
 same_spec_df.to_csv(same_out, index=False)
+coupling_df.to_csv(coupling_out, index=False)
 print(f"\n  saved: {disp_out}")
-print(f"  saved: {centroid_out}")
-print(f"  saved: {perturb_out}")
+print(f"  saved: {traj_out}")
+print(f"  saved: {traj_seed_out}")
 print(f"  saved: {same_out}")
+print(f"  saved: {coupling_out}")
